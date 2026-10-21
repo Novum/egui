@@ -366,6 +366,6 @@ mod tests {
         let glyph = galley.rows[0].row.glyphs[0];
         assert_eq!(glyph.chr, '…');
         assert_eq!(glyph.advance_width, 10.0);
-        assert!(!glyph.uv_rect.is_nothing());
+        assert!(!glyph.geometry.is_nothing());
     }
 }

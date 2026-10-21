@@ -73,3 +73,8 @@ wgpu = { workspace = true, features = ["wgsl"] }
 
 egui = { workspace = true, optional = true, default-features = false }
 winit = { workspace = true, optional = true, default-features = false }
+
+[dev-dependencies]
+epaint = { workspace = true, features = ["default_fonts", "color_fonts"] }
+pollster.workspace = true
+image = { workspace = true, features = ["png"] }

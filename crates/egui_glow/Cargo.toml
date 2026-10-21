@@ -69,6 +69,7 @@ winit = { workspace = true, optional = true, default-features = false, features 
 [dev-dependencies]
 glutin = { workspace = true, default-features = true } # examples/pure_glow
 glutin-winit = { workspace = true, default-features = true }
+epaint = { workspace = true, features = ["color_fonts"] }
 
 [[example]]
 name = "pure_glow"
