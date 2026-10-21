@@ -22,7 +22,7 @@ use super::{
     VariationCoords,
     family::FamilyKey,
     font_face::{FontFace, GlyphInfo, ShapedGlyph},
-    glyph_atlas::{GlyphAllocation, OutlineGlyph, RasterGlyphAllocation},
+    glyph::{GlyphAllocation, GlyphLocation, GlyphWithAdvance, OutlineGlyph},
 };
 
 // ----------------------------------------------------------------------------
@@ -185,7 +185,7 @@ impl ShapingContext {
         face_metrics: &StyledMetrics,
         alloc: GlyphAllocation,
     ) -> Glyph {
-        let GlyphAllocation { uv_rect, is_color } = alloc;
+        let GlyphAllocation { geometry, is_color } = alloc;
         Glyph {
             chr,
             pos: pos2(physical_x as f32 / self.pixels_per_point, f32::NAN),
@@ -195,7 +195,7 @@ impl ShapingContext {
             font_face_ascent: face_metrics.ascent,
             font_height: self.font_metrics.row_height,
             font_ascent: self.font_metrics.ascent,
-            uv_rect,
+            geometry,
             is_color,
             section_index: self.section_index,
             first_vertex: 0,
@@ -217,7 +217,7 @@ struct TextRun {
     /// Set if a priority [`GlyphRasterizer`](crate::text::GlyphRasterizer) rendered this run.
     ///
     /// Such a run is exactly one grapheme cluster, and is not shaped.
-    raster: Option<RasterGlyphAllocation>,
+    raster: Option<GlyphWithAdvance>,
 }
 
 /// Emit shaped glyphs from a [`harfrust::GlyphBuffer`] into a [`Paragraph`].
@@ -376,7 +376,7 @@ fn layout_shaped_run(
 
             // Apply shaper y_offset — this varies per glyph instance so it
             // is not part of the cached ShapedGlyph / GlyphAllocation.
-            glyph_alloc.uv_rect.offset.y += y_offset_px / ctx.pixels_per_point;
+            glyph_alloc.geometry.offset.y += y_offset_px / ctx.pixels_per_point;
 
             paragraph.cursor_x_px += advance_width_px;
 
@@ -430,7 +430,7 @@ fn raster_glyph(
     ctx: &ShapingContext,
     paragraph: &mut Paragraph,
     chr: char,
-    raster: &RasterGlyphAllocation,
+    raster: &GlyphWithAdvance,
     face_metrics: &StyledMetrics,
 ) -> Glyph {
     let physical_x = paragraph.cursor_x_px.round() as i32;
@@ -453,7 +453,7 @@ fn layout_raster_run(
     ctx: &mut ShapingContext,
     paragraph: &mut Paragraph,
     run_text: &str,
-    raster: &RasterGlyphAllocation,
+    raster: &GlyphWithAdvance,
 ) {
     let Some(chr) = run_text.chars().next() else {
         return;
@@ -955,7 +955,7 @@ fn replace_last_glyph_with_overflow_character(
                 font_face_ascent: font_face_metrics.ascent,
                 font_height: font_metrics.row_height,
                 font_ascent: font_metrics.ascent,
-                uv_rect: replacement_glyph_alloc.uv_rect,
+                geometry: replacement_glyph_alloc.geometry,
                 is_color: replacement_glyph_alloc.is_color,
                 section_index,
                 first_vertex: 0, // filled in later
@@ -1283,17 +1283,23 @@ fn add_row_backgrounds(point_scale: PointScale, job: &LayoutJob, row: &Row, mesh
 fn tessellate_glyphs(point_scale: PointScale, job: &LayoutJob, row: &mut Row, mesh: &mut Mesh) {
     for glyph in &mut row.glyphs {
         glyph.first_vertex = mesh.vertices.len() as u32;
-        let uv_rect = glyph.uv_rect;
-        if !uv_rect.is_nothing() {
-            let mut left_top = glyph.pos + uv_rect.offset;
-            left_top.x = point_scale.round_to_pixel(left_top.x);
-            left_top.y = point_scale.round_to_pixel(left_top.y);
+        let geometry = glyph.geometry;
+        if !geometry.is_nothing() {
+            let mut left_top = glyph.pos + geometry.offset;
+            if !geometry.is_vector() {
+                left_top.x = point_scale.round_to_pixel(left_top.x);
+                left_top.y = point_scale.round_to_pixel(left_top.y);
+            }
 
-            let rect = Rect::from_min_max(left_top, left_top + uv_rect.size);
-            let uv = Rect::from_min_max(
-                pos2(uv_rect.min[0] as f32, uv_rect.min[1] as f32),
-                pos2(uv_rect.max[0] as f32, uv_rect.max[1] as f32),
-            );
+            let rect = Rect::from_min_max(left_top, left_top + geometry.size);
+            let uv = match geometry.location {
+                GlyphLocation::None => continue,
+                GlyphLocation::Vector { .. } => Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
+                GlyphLocation::Bitmap { min, max } => Rect::from_min_max(
+                    pos2(min[0] as f32, min[1] as f32),
+                    pos2(max[0] as f32, max[1] as f32),
+                ),
+            };
 
             let format = &job.sections[glyph.section_index as usize].format;
 
@@ -1312,24 +1318,48 @@ fn tessellate_glyphs(point_scale: PointScale, job: &LayoutJob, row: &mut Row, me
                     pos: rect.left_top() + top_offset,
                     uv: uv.left_top(),
                     color,
+                    glyph_basis_y: Vec2::ZERO,
+                    glyph_origin: [0; 2],
                 });
                 mesh.vertices.push(Vertex {
                     pos: rect.right_top() + top_offset,
                     uv: uv.right_top(),
                     color,
+                    glyph_basis_y: Vec2::ZERO,
+                    glyph_origin: [0; 2],
                 });
                 mesh.vertices.push(Vertex {
                     pos: rect.left_bottom(),
                     uv: uv.left_bottom(),
                     color,
+                    glyph_basis_y: Vec2::ZERO,
+                    glyph_origin: [0; 2],
                 });
                 mesh.vertices.push(Vertex {
                     pos: rect.right_bottom(),
                     uv: uv.right_bottom(),
                     color,
+                    glyph_basis_y: Vec2::ZERO,
+                    glyph_origin: [0; 2],
                 });
             } else {
                 mesh.add_rect_with_uv(rect, uv, color);
+            }
+            if let GlyphLocation::Vector { origin } = geometry.location {
+                debug_assert!(origin[1] < 1 << 14, "Band record row exceeds 14 bits");
+                let first = glyph.first_vertex as usize;
+                let basis = [
+                    mesh.vertices[first + 1].pos - mesh.vertices[first].pos,
+                    mesh.vertices[first + 2].pos - mesh.vertices[first].pos,
+                ];
+                for vertex in &mut mesh.vertices[first..first + 4] {
+                    vertex.glyph_origin = [
+                        origin[0] + 1,
+                        origin[1] | ((vertex.uv.x as u16) << 14) | ((vertex.uv.y as u16) << 15),
+                    ];
+                    vertex.uv = basis[0].to_pos2();
+                    vertex.glyph_basis_y = basis[1];
+                }
             }
         }
     }
@@ -1670,7 +1700,7 @@ mod tests {
 
         // Every character gets a tofu box, whitespace included:
         for (i, glyph) in row.glyphs.iter().enumerate() {
-            assert!(!glyph.uv_rect.is_nothing(), "glyph {i}: {glyph:?}");
+            assert!(!glyph.geometry.is_nothing(), "glyph {i}: {glyph:?}");
             assert!(0.0 < glyph.advance_width, "glyph {i}: {glyph:?}");
             assert_eq!(galley.clamp_cursor(&CCursor::new(i)).index.0, i);
             assert!(
@@ -1684,14 +1714,31 @@ mod tests {
 
     #[test]
     fn no_font_tofu_is_cached_across_layouts() {
-        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::empty());
-        let mut view = fonts.with_pixels_per_point(1.0);
-        let a = view.layout_no_wrap("a".into(), FontId::proportional(14.0), Color32::WHITE);
-        let b = view.layout_no_wrap("b".into(), FontId::proportional(14.0), Color32::WHITE);
-        assert_eq!(
-            a.rows[0].row.glyphs[0].uv_rect.min, b.rows[0].row.glyphs[0].uv_rect.min,
-            "the same synthetic tofu box should be reused"
-        );
+        for mode in [
+            crate::text::FontRendering::Bitmap,
+            crate::text::FontRendering::Vector,
+        ] {
+            let mut fonts = Fonts::new(
+                TextOptions {
+                    font_rendering: mode,
+                    ..Default::default()
+                },
+                FontDefinitions::empty(),
+            );
+            let mut view = fonts.with_pixels_per_point(1.0);
+            let a = view.layout_no_wrap("a".into(), FontId::proportional(14.0), Color32::WHITE);
+            let b = view.layout_no_wrap("b".into(), FontId::proportional(14.0), Color32::WHITE);
+            let geometry = a.rows[0].row.glyphs[0].geometry;
+            assert!(!geometry.is_nothing());
+            assert_eq!(
+                geometry.is_vector(),
+                mode == crate::text::FontRendering::Vector
+            );
+            assert_eq!(
+                geometry, b.rows[0].row.glyphs[0].geometry,
+                "the same synthetic tofu box should be reused in {mode:?}"
+            );
+        }
     }
 
     #[test]
@@ -1779,8 +1826,7 @@ mod tests {
         let rasterizer = GlyphRasterizer::new("test", |request: &GlyphRasterizerRequest<'_>| {
             (request.cluster == "한").then(color_raster_glyph)
         });
-        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default())
-            .with_glyph_rasterizer(rasterizer);
+        let mut fonts = test_fonts().with_glyph_rasterizer(rasterizer);
 
         // Returns the tessellated vertex color of 'a' (a normal glyph) and '한' (a color glyph).
         let mut glyph_colors = |text_color: Color32, override_text_color: Option<Color32>| {
@@ -1847,7 +1893,11 @@ mod tests {
             Color32::WHITE,
         );
 
-        let [x, y] = galley.rows[0].row.glyphs[0].uv_rect.min;
+        let GlyphLocation::Bitmap { min: [x, y], .. } =
+            galley.rows[0].row.glyphs[0].geometry.location
+        else {
+            panic!("expected bitmap allocation");
+        };
         assert_eq!(fonts.image()[(x as usize, y as usize)], Color32::RED);
     }
 
@@ -1879,7 +1929,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "default_fonts")]
     /// Each test rasterizer needs its own [`GlyphRasterizer::key`], or they would replace each other.
     fn unique_test_key() -> String {
         static COUNTER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -1905,7 +1954,7 @@ mod tests {
             .rows
             .iter()
             .flat_map(|row| &row.row.glyphs)
-            .map(|glyph| (glyph.chr, glyph.is_color, !glyph.uv_rect.is_nothing()))
+            .map(|glyph| (glyph.chr, glyph.is_color, !glyph.geometry.is_nothing()))
             .collect()
     }
 
@@ -1938,11 +1987,10 @@ mod tests {
     }
 
     #[test]
-    fn raster_glyph_cache_is_keyed_by_family() {
+    fn raster_glyph_atlas_is_keyed_by_family() {
         let requests = Arc::new(crate::mutex::Mutex::new(Vec::new()));
         let rasterizer = recording_rasterizer(&requests, Some(white_raster_glyph()));
-        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default())
-            .with_glyph_rasterizer(rasterizer);
+        let mut fonts = test_fonts().with_glyph_rasterizer(rasterizer);
 
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             let job = LayoutJob::simple(
@@ -1967,8 +2015,7 @@ mod tests {
     fn raster_glyph_failure_is_cached_and_falls_back_to_replacement() {
         let requests = Arc::new(crate::mutex::Mutex::new(Vec::new()));
         let rasterizer = recording_rasterizer(&requests, None);
-        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default())
-            .with_glyph_rasterizer(rasterizer);
+        let mut fonts = test_fonts().with_glyph_rasterizer(rasterizer);
         let job = Arc::new(LayoutJob::simple(
             "한".into(),
             FontId::proportional(14.0),
@@ -1983,7 +2030,7 @@ mod tests {
         let glyph = &galley.rows[0].row.glyphs[0];
         assert_eq!(glyph.chr, '한');
         assert!(
-            !glyph.uv_rect.is_nothing(),
+            !glyph.geometry.is_nothing(),
             "Should render the `.notdef` glyph"
         );
     }
@@ -2082,7 +2129,7 @@ mod tests {
 
         let galley = layout_simple(&mut fonts, "한");
 
-        assert!(!galley.rows[0].row.glyphs[0].uv_rect.is_nothing());
+        assert!(!galley.rows[0].row.glyphs[0].geometry.is_nothing());
         assert_eq!(first_requests.lock().len(), 1);
         assert_eq!(second_requests.lock().len(), 1);
         assert_eq!(
@@ -2126,7 +2173,7 @@ mod tests {
         let last = &glyphs[glyphs.len() - 1];
         assert_eq!(last.chr, '…');
         assert!(last.is_color, "Should come from the priority rasterizer");
-        assert!(!last.uv_rect.is_nothing());
+        assert!(!last.geometry.is_nothing());
     }
 
     #[test]
@@ -2188,6 +2235,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "default_fonts")]
     #[test]
     // No bundled font has CJK glyphs, so the line breaks depend on
     // the width of the `.notdef` glyph of the primary font.
@@ -2206,6 +2254,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "default_fonts")]
     #[test]
     // No bundled font has CJK glyphs, so the line breaks depend on
     // the width of the `.notdef` glyph of the primary font.
@@ -2319,6 +2368,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "default_fonts")]
     #[test]
     fn test_end_with_newline() {
         let pixels_per_point = 1.0;
@@ -2554,6 +2604,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "default_fonts")]
     #[test]
     fn test_gpos_kerning() {
         // GPOS kerning: pairs like "AV", "VA", "AT" should be tighter than
@@ -2698,6 +2749,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "default_fonts")]
     fn measure_text(
         fonts: &mut FontsImpl,
         text: &str,

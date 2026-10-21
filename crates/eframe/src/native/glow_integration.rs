@@ -107,6 +107,7 @@ struct GlutinWindowContext {
     gl_config: glutin::config::Config,
 
     max_texture_side: Option<usize>,
+    vector_fonts: Option<bool>,
 
     /// Passed on to each [`egui_winit::State`]. See [`NativeOptions::clipboard_shortcuts`].
     clipboard_shortcuts: bool,
@@ -337,9 +338,11 @@ impl<'app> GlowWinitApp<'app> {
 
         let max_texture_side = painter.max_texture_side();
         glutin.max_texture_side = Some(max_texture_side);
+        glutin.vector_fonts = Some(painter.supports_vector_fonts());
         for viewport in glutin.viewports.values_mut() {
             if let Some(egui_winit) = viewport.egui_winit.as_mut() {
                 egui_winit.set_max_texture_side(max_texture_side);
+                egui_winit.egui_input_mut().vector_fonts = glutin.vector_fonts;
             }
         }
 
@@ -1340,6 +1343,7 @@ impl GlutinWindowContext {
             viewports,
             viewport_from_window,
             max_texture_side: None,
+            vector_fonts: None,
             clipboard_shortcuts: native_options.clipboard_shortcuts,
             window_from_viewport,
             focused_viewport: Some(ViewportId::ROOT),
@@ -1404,6 +1408,7 @@ impl GlutinWindowContext {
                 self.max_texture_side,
             );
             egui_winit.set_clipboard_shortcuts(self.clipboard_shortcuts);
+            egui_winit.egui_input_mut().vector_fonts = self.vector_fonts;
             egui_winit
         });
 

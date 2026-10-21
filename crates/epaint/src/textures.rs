@@ -134,7 +134,7 @@ pub struct TextureMeta {
     /// width x height
     pub resolution: [usize; 2],
 
-    /// 4 or 1
+    /// Number of bytes per texel.
     pub bytes_per_pixel: usize,
 
     /// Free when this reaches zero.
@@ -278,7 +278,7 @@ pub enum TextureWrapMode {
 /// What has been allocated and freed during the last period.
 ///
 /// These are commands given to the integration painter.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[must_use = "The painter must take care of this"]
 pub struct TexturesDelta {
@@ -319,6 +319,7 @@ impl TexturesDelta {
             self.set.remove(id);
         }
         for (id, deltas) in newer.set.drain() {
+            self.free.remove(&id);
             for delta in deltas {
                 self.push(id, delta);
             }

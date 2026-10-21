@@ -87,6 +87,10 @@ pub struct Painter {
     program: glow::Program,
     u_screen_size: glow::UniformLocation,
     u_sampler: glow::UniformLocation,
+    u_pixel_size: Option<glow::UniformLocation>,
+    u_curves: Option<glow::UniformLocation>,
+    u_bands: Option<glow::UniformLocation>,
+    vector_textures: Option<crate::font_textures::FontTextures>,
     is_webgl_1: bool,
     vao: crate::vao::VertexArrayObject,
     srgb_textures: bool,
@@ -212,40 +216,52 @@ impl Painter {
             gl.delete_shader(frag);
             let u_screen_size = gl.get_uniform_location(program, "u_screen_size").unwrap();
             let u_sampler = gl.get_uniform_location(program, "u_sampler").unwrap();
+            let (u_pixel_size, u_curves, u_bands, vector_textures) =
+                if shader_version.is_new_shader_interface() {
+                    (
+                        Some(gl.get_uniform_location(program, "u_pixel_size").unwrap()),
+                        Some(gl.get_uniform_location(program, "u_curves").unwrap()),
+                        Some(gl.get_uniform_location(program, "u_bands").unwrap()),
+                        Some(crate::font_textures::FontTextures::new(&gl)?),
+                    )
+                } else {
+                    (None, None, None, None)
+                };
 
             let vbo = gl.create_buffer()?;
 
-            let a_pos_loc = gl.get_attrib_location(program, "a_pos").unwrap();
-            let a_tc_loc = gl.get_attrib_location(program, "a_tc").unwrap();
-            let a_srgba_loc = gl.get_attrib_location(program, "a_srgba").unwrap();
-
-            let stride = core::mem::size_of::<Vertex>() as i32;
-            let buffer_infos = vec![
-                vao::BufferInfo {
-                    location: a_pos_loc,
-                    vector_size: 2,
-                    data_type: glow::FLOAT,
-                    normalized: false,
-                    stride,
-                    offset: offset_of!(Vertex, pos) as i32,
-                },
-                vao::BufferInfo {
-                    location: a_tc_loc,
-                    vector_size: 2,
-                    data_type: glow::FLOAT,
-                    normalized: false,
-                    stride,
-                    offset: offset_of!(Vertex, uv) as i32,
-                },
-                vao::BufferInfo {
-                    location: a_srgba_loc,
-                    vector_size: 4,
-                    data_type: glow::UNSIGNED_BYTE,
-                    normalized: false,
-                    stride,
-                    offset: offset_of!(Vertex, color) as i32,
-                },
+            let mut attributes = vec![
+                ("a_pos", 2, glow::FLOAT, offset_of!(Vertex, pos)),
+                ("a_tc", 2, glow::FLOAT, offset_of!(Vertex, uv)),
+                ("a_srgba", 4, glow::UNSIGNED_BYTE, offset_of!(Vertex, color)),
             ];
+            if vector_textures.is_some() {
+                attributes.extend([
+                    (
+                        "a_glyph_basis_y",
+                        2,
+                        glow::FLOAT,
+                        offset_of!(Vertex, glyph_basis_y),
+                    ),
+                    (
+                        "a_glyph_origin",
+                        2,
+                        glow::UNSIGNED_SHORT,
+                        offset_of!(Vertex, glyph_origin),
+                    ),
+                ]);
+            }
+            let buffer_infos = attributes
+                .into_iter()
+                .map(|(name, vector_size, data_type, offset)| vao::BufferInfo {
+                    location: gl.get_attrib_location(program, name).unwrap(),
+                    vector_size,
+                    data_type,
+                    normalized: false,
+                    stride: core::mem::size_of::<Vertex>() as i32,
+                    offset: offset as i32,
+                })
+                .collect();
             let vao = crate::vao::VertexArrayObject::new(&gl, vbo, buffer_infos);
 
             let element_array_buffer = gl.create_buffer()?;
@@ -258,6 +274,10 @@ impl Painter {
                 program,
                 u_screen_size,
                 u_sampler,
+                u_pixel_size,
+                u_curves,
+                u_bands,
+                vector_textures,
                 is_webgl_1,
                 vao,
                 srgb_textures,
@@ -338,6 +358,13 @@ impl Painter {
             self.gl
                 .uniform_2_f32(Some(&self.u_screen_size), width_in_points, height_in_points);
             self.gl.uniform_1_i32(Some(&self.u_sampler), 0);
+            self.gl
+                .uniform_1_f32(self.u_pixel_size.as_ref(), 1.0 / pixels_per_point);
+            if let Some(textures) = &self.vector_textures {
+                self.gl.uniform_1_i32(self.u_curves.as_ref(), 1);
+                self.gl.uniform_1_i32(self.u_bands.as_ref(), 2);
+                textures.bind(&self.gl, &self.textures);
+            }
             self.gl.active_texture(glow::TEXTURE0);
 
             self.vao.bind(&self.gl);
@@ -507,6 +534,11 @@ impl Painter {
 
     // ------------------------------------------------------------------------
 
+    /// Whether the selected shader supports curve and integer band textures.
+    pub fn supports_vector_fonts(&self) -> bool {
+        self.vector_textures.is_some()
+    }
+
     pub fn set_texture(&mut self, tex_id: egui::TextureId, delta: &egui::epaint::ImageDelta) {
         profiling::function_scope!();
 
@@ -520,28 +552,40 @@ impl Painter {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(glow_texture));
         }
 
-        match &delta.image {
-            egui::ImageData::Color(image) => {
-                let data: &[u8] = bytemuck::cast_slice(image.pixels());
-                self.upload_texture_srgb(delta.pos, image.resolution(), delta.options, data);
-            }
-        }
+        self.upload_texture(delta);
     }
 
-    fn upload_texture_srgb(
-        &mut self,
-        pos: Option<[usize; 2]>,
-        [w, h]: [usize; 2],
-        options: egui::TextureOptions,
-        data: &[u8],
-    ) {
+    fn upload_texture(&mut self, delta: &egui::epaint::ImageDelta) {
         profiling::function_scope!();
+        let [w, h] = delta.image.resolution();
+        let options = delta.options;
+        let (data, numeric_format): (&[u8], _) = match &delta.image {
+            egui::ImageData::Color(image) => (bytemuck::cast_slice(image.pixels()), None),
+            egui::ImageData::Rgba32Float { pixels, .. } => (
+                bytemuck::cast_slice(pixels),
+                Some((glow::RGBA32F, glow::RGBA, glow::FLOAT)),
+            ),
+            egui::ImageData::Rgba32Uint { pixels, .. } => (
+                bytemuck::cast_slice(pixels),
+                Some((glow::RGBA32UI, glow::RGBA_INTEGER, glow::UNSIGNED_INT)),
+            ),
+        };
         assert_eq!(
             data.len(),
-            w * h * 4,
-            "Mismatch between texture size and texel count, by {}",
-            data.len() % (w * h * 4)
+            w * h * delta.image.bytes_per_pixel(),
+            "Texture dimensions do not match pixel data"
         );
+        if numeric_format.is_some() {
+            assert!(
+                self.supports_vector_fonts(),
+                "Numeric textures require OpenGL 3 or WebGL 2"
+            );
+            assert_eq!(
+                options,
+                egui::TextureOptions::NEAREST,
+                "Numeric textures require nearest sampling"
+            );
+        }
         assert!(
             w <= self.max_texture_side && h <= self.max_texture_side,
             "Got a texture image of size {}x{}, but the maximum supported texture side is only {}",
@@ -574,23 +618,25 @@ impl Painter {
             );
             check_for_gl_error!(&self.gl, "tex_parameter");
 
-            let (internal_format, src_format) = if self.is_webgl_1 {
+            let (internal_format, src_format, src_type) = if let Some(format) = numeric_format {
+                format
+            } else if self.is_webgl_1 {
                 let format = if self.srgb_textures {
                     glow::SRGB_ALPHA
                 } else {
                     glow::RGBA
                 };
-                (format, format)
+                (format, format, glow::UNSIGNED_BYTE)
             } else if self.srgb_textures {
-                (glow::SRGB8_ALPHA8, glow::RGBA)
+                (glow::SRGB8_ALPHA8, glow::RGBA, glow::UNSIGNED_BYTE)
             } else {
-                (glow::RGBA8, glow::RGBA)
+                (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)
             };
 
             self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
 
             let level = 0;
-            if let Some([x, y]) = pos {
+            if let Some([x, y]) = delta.pos {
                 profiling::scope!("gl.tex_sub_image_2d");
                 self.gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
@@ -600,7 +646,7 @@ impl Painter {
                     w as _,
                     h as _,
                     src_format,
-                    glow::UNSIGNED_BYTE,
+                    src_type,
                     glow::PixelUnpackData::Slice(Some(data)),
                 );
                 check_for_gl_error!(&self.gl, "tex_sub_image_2d");
@@ -615,7 +661,7 @@ impl Painter {
                     h as _,
                     border,
                     src_format,
-                    glow::UNSIGNED_BYTE,
+                    src_type,
                     glow::PixelUnpackData::Slice(Some(data)),
                 );
                 check_for_gl_error!(&self.gl, "tex_image_2d");
@@ -695,6 +741,9 @@ impl Painter {
     unsafe fn destroy_gl(&self) {
         unsafe {
             self.gl.delete_program(self.program);
+            if let Some(textures) = &self.vector_textures {
+                textures.destroy(&self.gl);
+            }
             #[expect(clippy::iter_over_hash_type)]
             for tex in self.textures.values() {
                 self.gl.delete_texture(*tex);
