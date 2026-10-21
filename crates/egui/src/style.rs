@@ -2544,16 +2544,44 @@ impl Visuals {
             ui.add_space(4.0);
 
             let TextOptions {
+                font_rendering,
                 max_texture_side: _,
                 color_transfer_function,
                 font_hinting,
                 subpixel_binning,
             } = text_options;
 
+            let vector_fonts_supported = ui.input(|input| input.vector_fonts);
+            ui.horizontal(|ui| {
+                ui.label("Font rendering:");
+                if vector_fonts_supported {
+                    ui.selectable_value(
+                        font_rendering,
+                        epaint::text::FontRendering::Vector,
+                        "Vector",
+                    );
+                    ui.selectable_value(
+                        font_rendering,
+                        epaint::text::FontRendering::Bitmap,
+                        "Bitmap",
+                    );
+                } else {
+                    ui.label("Bitmap");
+                }
+            });
+
             color_transfer_function_ui(ui, color_transfer_function);
 
-            ui.checkbox(font_hinting, "Font hinting (sharper text)");
-            ui.checkbox(subpixel_binning, "Sub-pixel binning (more even kerning)");
+            ui.add_enabled_ui(
+                !vector_fonts_supported || *font_rendering == epaint::text::FontRendering::Bitmap,
+                |ui| {
+                    ui.checkbox(font_hinting, "Bitmap font hinting (sharper text)");
+                    ui.checkbox(
+                        subpixel_binning,
+                        "Bitmap sub-pixel binning (more even kerning)",
+                    );
+                },
+            );
         });
 
         ui.collapsing("Text cursor", |ui| {

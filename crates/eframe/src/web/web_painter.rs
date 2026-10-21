@@ -16,6 +16,11 @@ pub(crate) trait WebPainter {
     /// Maximum size of a texture in one direction.
     fn max_texture_side(&self) -> usize;
 
+    /// Whether the renderer supports vector fonts.
+    fn supports_vector_fonts(&self) -> bool {
+        true
+    }
+
     /// Update all internal textures and paint gui.
     /// When `capture` isn't empty, the rendered screen should be captured
     /// and passed to the callbacks once it is ready.

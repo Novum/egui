@@ -401,6 +401,7 @@ impl ViewportRepaintInfo {
 #[derive(Default)]
 struct ContextImpl {
     fonts: Option<Fonts>,
+
     font_definitions: FontDefinitions,
     glyph_rasterizers: Vec<GlyphRasterizer>,
     font_providers: Vec<Arc<dyn FontProvider>>,
@@ -585,6 +586,7 @@ impl ContextImpl {
         profiling::function_scope!();
         let input = &self.viewport().input;
         let max_texture_side = input.max_texture_side;
+        let vector_fonts = input.vector_fonts;
 
         if core::mem::take(&mut self.reload_fonts) {
             // The rasterizers or providers changed during the last pass.
@@ -626,6 +628,9 @@ impl ContextImpl {
             mut text_options, ..
         } = self.memory.options.style().visuals;
         text_options.max_texture_side = max_texture_side;
+        if !vector_fonts {
+            text_options.font_rendering = epaint::text::FontRendering::Bitmap;
+        }
 
         let mut is_new = false;
         let viewport_id = self.viewport_id();
@@ -3166,7 +3171,10 @@ impl ContextImpl {
         }
 
         // Inform the backend of all textures that have been updated (including font atlas).
-        let textures_delta = self.tex_manager.0.write().take_delta();
+        let mut textures_delta = self.tex_manager.0.write().take_delta();
+        if let Some(delta) = self.fonts.as_mut().and_then(Fonts::font_textures_delta) {
+            textures_delta.append(delta);
+        }
 
         let mut platform_output: PlatformOutput = core::mem::take(&mut viewport.output);
 
@@ -5157,6 +5165,157 @@ mod test {
         super::warn_if_rect_changes_id(&mut shapes, &previous, &current, &[rect]);
 
         assert!(shapes.is_empty());
+    }
+
+    #[test]
+    fn painter_capability_preserves_requested_font_rendering() {
+        use epaint::{TextureId, text::FontRendering};
+        let ctx = Context::default();
+        ctx.all_styles_mut(|style| {
+            style.visuals.text_options.font_rendering = FontRendering::Vector;
+        });
+        assert!(ctx.input(|input| input.vector_fonts));
+        let mut input = crate::RawInput::default();
+        let output = ctx.run_ui(input.take(), |ui| {
+            ui.label("Vector");
+        });
+        assert!(
+            output
+                .textures_delta
+                .set
+                .contains_key(&TextureId::FontCurves)
+        );
+        assert!(
+            output
+                .textures_delta
+                .set
+                .contains_key(&TextureId::FontBands)
+        );
+        output.drop_without_applying_deltas();
+
+        input.vector_fonts = Some(false);
+        for theme in [crate::Theme::Dark, crate::Theme::Light] {
+            assert_eq!(
+                ctx.style_of(theme).visuals.text_options.font_rendering,
+                FontRendering::Vector
+            );
+        }
+        let output = ctx.run_ui(input.take(), |ui| {
+            ui.label("Bitmap");
+            assert_eq!(
+                ui.ctx().fonts(|fonts| fonts.options().font_rendering),
+                FontRendering::Bitmap
+            );
+        });
+        assert!(output.textures_delta.free.contains(&TextureId::FontCurves));
+        assert!(output.textures_delta.free.contains(&TextureId::FontBands));
+        assert!(!ctx.input(|input| input.vector_fonts));
+        output.drop_without_applying_deltas();
+
+        ctx.all_styles_mut(|style| {
+            style.visuals.text_options.font_rendering = FontRendering::Bitmap;
+        });
+        let output = ctx.run_ui(input.take(), |ui| {
+            ui.label("Bitmap");
+        });
+        assert!(
+            !output
+                .textures_delta
+                .set
+                .contains_key(&TextureId::FontCurves)
+        );
+        assert!(!output.textures_delta.free.contains(&TextureId::FontCurves));
+        output.drop_without_applying_deltas();
+
+        ctx.all_styles_mut(|style| {
+            style.visuals.text_options.font_rendering = FontRendering::Vector;
+        });
+        let output = ctx.run_ui(input.take(), |ui| {
+            ui.label("Bitmap");
+        });
+        assert!(
+            !output
+                .textures_delta
+                .set
+                .contains_key(&TextureId::FontCurves)
+        );
+        assert!(!output.textures_delta.free.contains(&TextureId::FontCurves));
+        output.drop_without_applying_deltas();
+
+        input.vector_fonts = Some(true);
+        let output = ctx.run_ui(input.take(), |ui| {
+            ui.label("Vector");
+            assert_eq!(
+                ui.ctx().fonts(|fonts| fonts.options().font_rendering),
+                FontRendering::Vector
+            );
+        });
+        assert!(
+            output
+                .textures_delta
+                .set
+                .contains_key(&TextureId::FontCurves)
+        );
+        assert!(
+            output
+                .textures_delta
+                .set
+                .contains_key(&TextureId::FontBands)
+        );
+        output.drop_without_applying_deltas();
+
+        ctx.all_styles_mut(|style| {
+            style.visuals.text_options.font_rendering = FontRendering::Bitmap;
+        });
+        let output = ctx.run_ui(input.take(), |ui| {
+            ui.label("Bitmap");
+            assert_eq!(
+                ui.ctx().fonts(|fonts| fonts.options().font_rendering),
+                FontRendering::Bitmap
+            );
+        });
+        assert!(output.textures_delta.free.contains(&TextureId::FontCurves));
+        assert!(output.textures_delta.free.contains(&TextureId::FontBands));
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn vector_font_support_persists_for_each_viewport() {
+        use crate::{RawInput, ViewportId};
+        use epaint::text::FontRendering;
+        let ctx = Context::default();
+        ctx.set_embed_viewports(false);
+        let child = ViewportId::from_hash_of("child");
+        for update in [Some(false), None] {
+            for viewport_id in [ViewportId::ROOT, child] {
+                let output = ctx.run_ui(
+                    RawInput {
+                        viewport_id,
+                        viewports: [
+                            (ViewportId::ROOT, Default::default()),
+                            (child, Default::default()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        vector_fonts: update,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        if viewport_id == ViewportId::ROOT {
+                            ui.ctx()
+                                .show_viewport_deferred(child, Default::default(), |_, _| {});
+                        }
+                        ui.label("Bitmap");
+                        assert!(!ui.input(|input| input.vector_fonts));
+                        assert_eq!(
+                            ui.ctx().fonts(|fonts| fonts.options().font_rendering),
+                            FontRendering::Bitmap
+                        );
+                    },
+                );
+                output.drop_without_applying_deltas();
+            }
+        }
     }
 
     /// Changing the font providers mid-pass must not drop the [`crate::text::Fonts`]
