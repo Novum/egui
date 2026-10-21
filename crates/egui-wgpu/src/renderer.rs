@@ -7,6 +7,36 @@ use epaint::{PaintCallbackInfo, Primitive, Vertex, emath::NumExt as _};
 
 use wgpu::util::DeviceExt as _;
 
+const SHADER_SOURCE: &str = include_str!("egui.wgsl");
+
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: core::mem::offset_of!(Vertex, pos) as u64,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: core::mem::offset_of!(Vertex, uv) as u64,
+        shader_location: 1,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: core::mem::offset_of!(Vertex, color) as u64,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: core::mem::offset_of!(Vertex, glyph_basis_y) as u64,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint16x2,
+        offset: core::mem::offset_of!(Vertex, glyph_origin) as u64,
+        shader_location: 4,
+    },
+];
+
 // Only implements Send + Sync on wasm32 in order to allow storing wgpu resources on the type map.
 #[cfg(not(all(
     target_arch = "wasm32",
@@ -150,6 +180,7 @@ struct UniformBuffer {
     ///
     /// See also <https://github.com/emilk/egui/issues/5295>.
     predictable_texture_filtering: u32,
+    pixel_size: [f32; 4],
 }
 
 struct SlicedBuffer {
@@ -162,8 +193,8 @@ pub struct Texture {
     /// The texture may be None if the `TextureId` is just a handle to a user-provided bind-group.
     pub texture: Option<wgpu::Texture>,
 
-    /// Bindgroup for the texture + sampler.
-    pub bind_group: wgpu::BindGroup,
+    /// Bindgroup for sampled color textures. Numeric textures have no sampler.
+    pub bind_group: Option<wgpu::BindGroup>,
 
     /// Options describing the sampler used in the bind group. This may be None if the `TextureId`
     /// is just a handle to a user-provided bind-group.
@@ -236,6 +267,7 @@ impl Default for RendererOptions {
 /// Renderer for a egui based GUI.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    font_textures: crate::font_textures::FontTextures,
 
     index_buffer: SlicedBuffer,
     vertex_buffer: SlicedBuffer,
@@ -279,7 +311,7 @@ impl Renderer {
 
         let shader = wgpu::ShaderModuleDescriptor {
             label: Some("egui"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("egui.wgsl"))),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
         };
         let module = {
             profiling::scope!("create_shader_module");
@@ -292,6 +324,7 @@ impl Renderer {
                 screen_size_in_points: [0.0, 0.0],
                 dithering: u32::from(options.dithering),
                 predictable_texture_filtering: u32::from(options.predictable_texture_filtering),
+                pixel_size: [1.0, 0.0, 0.0, 0.0],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -377,11 +410,13 @@ impl Renderer {
             })
         });
 
+        let font_textures = crate::font_textures::FontTextures::new(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("egui_pipeline_layout"),
             bind_group_layouts: &[
                 Some(&uniform_bind_group_layout),
                 Some(&texture_bind_group_layout),
+                Some(&font_textures.layout),
             ],
             immediate_size: 0,
         });
@@ -405,12 +440,9 @@ impl Renderer {
                     entry_point: Some("vs_main"),
                     module: &module,
                     buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: 5 * 4,
+                        array_stride: core::mem::size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        // 0: vec2 position
-                        // 1: vec2 texture coordinates
-                        // 2: uint color
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32],
+                        attributes: &VERTEX_ATTRIBUTES,
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default()
                 },
@@ -469,6 +501,7 @@ impl Renderer {
 
         Self {
             pipeline,
+            font_textures,
             vertex_buffer: SlicedBuffer {
                 buffer: create_vertex_buffer(device, VERTEX_BUFFER_START_CAPACITY),
                 slices: Vec::with_capacity(64),
@@ -537,6 +570,7 @@ impl Renderer {
                 );
                 render_pass.set_pipeline(&self.pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(2, &self.font_textures.bind_group, &[]);
                 needs_reset = false;
             }
 
@@ -569,7 +603,11 @@ impl Renderer {
                         .next()
                         .expect("You must call .update_buffers() before .render()");
 
-                    if let Some(Texture { bind_group, .. }) = self.textures.get(&mesh.texture_id) {
+                    if let Some(Texture {
+                        bind_group: Some(bind_group),
+                        ..
+                    }) = self.textures.get(&mesh.texture_id)
+                    {
                         render_pass.set_bind_group(1, bind_group, &[]);
                         render_pass.set_index_buffer(
                             self.index_buffer.buffer.slice(
@@ -633,7 +671,7 @@ impl Renderer {
         render_pass.set_scissor_rect(0, 0, size_in_pixels[0], size_in_pixels[1]);
     }
 
-    /// Should be called before [`Self::render`].
+    /// Apply an image texture update before [`Self::render`].
     pub fn update_texture(
         &mut self,
         device: &wgpu::Device,
@@ -652,9 +690,45 @@ impl Renderer {
             depth_or_array_layers: 1,
         };
 
-        let data_bytes: &[u8] = match &image_delta.image {
-            epaint::ImageData::Color(image) => bytemuck::cast_slice(image.pixels()),
+        let (format, data_bytes): (_, &[u8]) = match &image_delta.image {
+            epaint::ImageData::Color(image) => (
+                wgpu::TextureFormat::Rgba8Unorm,
+                bytemuck::cast_slice(image.pixels()),
+            ),
+            epaint::ImageData::Rgba32Float { pixels, .. } => (
+                wgpu::TextureFormat::Rgba32Float,
+                bytemuck::cast_slice(pixels),
+            ),
+            epaint::ImageData::Rgba32Uint { pixels, .. } => (
+                wgpu::TextureFormat::Rgba32Uint,
+                bytemuck::cast_slice(pixels),
+            ),
         };
+        assert_eq!(
+            data_bytes.len(),
+            width as usize * height as usize * image_delta.image.bytes_per_pixel(),
+            "Texture dimensions do not match pixel data"
+        );
+        if format != wgpu::TextureFormat::Rgba8Unorm {
+            assert_eq!(
+                image_delta.options,
+                epaint::textures::TextureOptions::NEAREST,
+                "Numeric textures require nearest sampling"
+            );
+        }
+        match id {
+            epaint::TextureId::FontCurves => assert_eq!(
+                format,
+                wgpu::TextureFormat::Rgba32Float,
+                "Invalid curve texture format"
+            ),
+            epaint::TextureId::FontBands => assert_eq!(
+                format,
+                wgpu::TextureFormat::Rgba32Uint,
+                "Invalid band texture format"
+            ),
+            _ => {}
+        }
 
         let queue_write_data_to_texture = |texture, origin| {
             profiling::scope!("write_texture");
@@ -668,7 +742,7 @@ impl Renderer {
                 data_bytes,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
+                    bytes_per_row: Some(image_delta.image.bytes_per_pixel() as u32 * width),
                     rows_per_image: Some(height),
                 },
                 size,
@@ -691,6 +765,11 @@ impl Renderer {
                 .expect("Tried to update a texture that has not been allocated yet.");
             let texture = texture.expect("Tried to update user texture.");
             let options = options.expect("Tried to update user texture.");
+            assert_eq!(
+                texture.format(),
+                format,
+                "Partial update changes texture format"
+            );
             let origin = wgpu::Origin3d {
                 x: pos[0] as u32,
                 y: pos[1] as u32,
@@ -703,7 +782,7 @@ impl Renderer {
                 // If the TextureOptions are the same as the previous ones, we can reuse the bind group. Otherwise we
                 // have to recreate it.
                 if image_delta.options == options {
-                    Some(bind_group)
+                    bind_group
                 } else {
                     None
                 },
@@ -718,43 +797,45 @@ impl Renderer {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+                    view_formats: &[],
                 })
             };
             let origin = wgpu::Origin3d::ZERO;
             (texture, origin, None)
         };
 
-        let bind_group = bind_group.unwrap_or_else(|| {
-            let nearest =
-                image_delta.options.magnification == epaint::textures::TextureFilter::Nearest;
-            let wrap_mode = wrap_mode_flag(image_delta.options.wrap_mode);
-            let sampler = self
-                .samplers
-                .entry(image_delta.options)
-                .or_insert_with(|| create_sampler(image_delta.options, device));
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label,
-                layout: &self.texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(
-                            &texture.create_view(&wgpu::TextureViewDescriptor::default()),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.texture_flag_buffers[texture_flags(nearest, wrap_mode)]
-                            .as_entire_binding(),
-                    },
-                ],
+        let bind_group = (format == wgpu::TextureFormat::Rgba8Unorm).then(|| {
+            bind_group.unwrap_or_else(|| {
+                let nearest =
+                    image_delta.options.magnification == epaint::textures::TextureFilter::Nearest;
+                let wrap_mode = wrap_mode_flag(image_delta.options.wrap_mode);
+                let sampler = self
+                    .samplers
+                    .entry(image_delta.options)
+                    .or_insert_with(|| create_sampler(image_delta.options, device));
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label,
+                    layout: &self.texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.texture_flag_buffers[texture_flags(nearest, wrap_mode)]
+                                .as_entire_binding(),
+                        },
+                    ],
+                })
             })
         });
 
@@ -769,6 +850,14 @@ impl Renderer {
             texture.height(),
         );
 
+        if matches!(
+            id,
+            epaint::TextureId::FontCurves | epaint::TextureId::FontBands
+        ) && image_delta.is_whole()
+        {
+            self.font_textures.dirty = true;
+        }
+
         self.textures.insert(
             id,
             Texture {
@@ -780,6 +869,12 @@ impl Renderer {
     }
 
     pub fn free_texture(&mut self, id: &epaint::TextureId) {
+        if matches!(
+            id,
+            epaint::TextureId::FontCurves | epaint::TextureId::FontBands
+        ) {
+            self.font_textures.dirty = true;
+        }
         if let Some(texture) = self.textures.remove(id).and_then(|t| t.texture) {
             texture.destroy();
         }
@@ -888,7 +983,7 @@ impl Renderer {
             id,
             Texture {
                 texture: None,
-                bind_group,
+                bind_group: Some(bind_group),
                 options: None,
             },
         );
@@ -946,7 +1041,7 @@ impl Renderer {
             ],
         });
 
-        *user_texture_binding = bind_group;
+        *user_texture_binding = Some(bind_group);
     }
 
     /// Uploads the uniform, vertex and index data used by the renderer.
@@ -963,12 +1058,15 @@ impl Renderer {
     ) -> Vec<wgpu::CommandBuffer> {
         profiling::function_scope!();
 
+        self.font_textures.update_bind_group(device, &self.textures);
+
         let screen_size_in_points = screen_descriptor.screen_size_in_points();
 
         let uniform_buffer_content = UniformBuffer {
             screen_size_in_points,
             dithering: u32::from(self.options.dithering),
             predictable_texture_filtering: u32::from(self.options.predictable_texture_filtering),
+            pixel_size: [1.0 / screen_descriptor.pixels_per_point, 0.0, 0.0, 0.0],
         };
         if uniform_buffer_content != self.previous_uniform_buffer_content {
             profiling::scope!("update uniforms");
@@ -1135,6 +1233,19 @@ const WRAP_MODE_MIRRORED_REPEAT: u32 = 2;
 
 /// Number of distinct values [`texture_flags`] can return.
 const NUM_TEXTURE_FLAGS: usize = 6;
+
+#[test]
+fn validate_font_shader() {
+    let source = SHADER_SOURCE;
+    let module = wgpu::naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+    wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+}
 
 fn wrap_mode_flag(wrap_mode: epaint::textures::TextureWrapMode) -> u32 {
     match wrap_mode {

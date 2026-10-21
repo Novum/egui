@@ -165,6 +165,10 @@ impl TextShape {
 
             for v in &mut mesh.vertices {
                 v.pos *= transform.scaling;
+                if v.glyph_origin[0] != 0 {
+                    v.uv = (v.uv.to_vec2() * transform.scaling).to_pos2();
+                    v.glyph_basis_y *= transform.scaling;
+                }
             }
         }
     }

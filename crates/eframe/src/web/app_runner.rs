@@ -61,11 +61,7 @@ impl AppRunner {
             #[cfg(feature = "glow")]
             epi::Renderer::Glow => {
                 log::debug!("Using the glow renderer");
-                let painter = super::web_painter_glow::WebPainterGlow::new(
-                    egui_ctx.clone(),
-                    canvas,
-                    &web_options,
-                )?;
+                let painter = super::web_painter_glow::WebPainterGlow::new(canvas, &web_options)?;
                 gl = Some(Arc::clone(painter.gl()));
                 Box::new(painter) as Box<dyn WebPainter>
             }
@@ -171,6 +167,7 @@ impl AppRunner {
         };
 
         runner.input.raw.max_texture_side = Some(runner.painter.max_texture_side());
+        runner.input.raw.vector_fonts = Some(runner.painter.supports_vector_fonts());
         runner
             .input
             .raw

@@ -19,11 +19,7 @@ impl WebPainterGlow {
         self.painter.gl()
     }
 
-    pub fn new(
-        _ctx: egui::Context,
-        canvas: HtmlCanvasElement,
-        options: &WebOptions,
-    ) -> Result<Self, String> {
+    pub fn new(canvas: HtmlCanvasElement, options: &WebOptions) -> Result<Self, String> {
         let (gl, shader_prefix) =
             init_glow_context_from_canvas(&canvas, options.webgl_context_option)?;
 
@@ -43,6 +39,10 @@ impl WebPainterGlow {
 }
 
 impl WebPainter for WebPainterGlow {
+    fn supports_vector_fonts(&self) -> bool {
+        self.painter.supports_vector_fonts()
+    }
+
     fn max_texture_side(&self) -> usize {
         self.painter.max_texture_side()
     }

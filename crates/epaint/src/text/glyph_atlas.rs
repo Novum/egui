@@ -1,74 +1,18 @@
-use emath::{NumExt as _, Vec2, vec2};
+use emath::{NumExt as _, vec2};
 use nohash_hasher::IntMap;
 use skrifa::GlyphId;
 
 use crate::{
-    FontColorTransferFunction, ImageDelta, TextOptions, TextureAtlas,
+    Color32, ColorImage, FontColorTransferFunction, ImageDelta, TextOptions, TextureAtlas,
     text::{
         FontFamily, FontPriority, GlyphBitmap, GlyphRasterizer, GlyphRasterizerRequest,
         MAX_GLYPH_SIZE, RasterizedGlyph,
         face_store::FontFaceKey,
         font_face::{FontFace, ShapedGlyph},
+        glyph::{GlyphAllocation, GlyphGeometry, GlyphLocation, GlyphWithAdvance, OutlineGlyph},
         styled_metrics::StyledMetrics,
     },
 };
-
-/// Where a glyph ended up in the font atlas, in UV coordinates.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct UvRect {
-    /// X/Y offset for nice rendering (unit: points).
-    pub offset: Vec2,
-
-    /// Screen size (in points) of this glyph.
-    /// Note that the height is different from the font height.
-    pub size: Vec2,
-
-    /// Top left corner UV in texture.
-    pub min: [u16; 2],
-
-    /// Bottom right corner (exclusive).
-    pub max: [u16; 2],
-}
-
-impl UvRect {
-    pub fn is_nothing(&self) -> bool {
-        self.min == self.max
-    }
-}
-
-/// Where a glyph is in the font atlas.
-///
-/// The default value is the invisible, zero-size glyph.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GlyphAllocation {
-    /// UV rectangle for drawing.
-    pub uv_rect: UvRect,
-
-    /// A color glyph (e.g. emoji), stored with its own colors in the atlas.
-    /// Do not tint it with the text color.
-    pub is_color: bool,
-}
-
-/// An outline glyph in the atlas, positioned for one [`ShapedGlyph`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct OutlineGlyph {
-    pub allocation: GlyphAllocation,
-
-    /// Left edge of the glyph's pixel grid, in physical pixels.
-    ///
-    /// This is [`ShapedGlyph::h_pos`] rounded to the pixel (or sub-pixel bin)
-    /// the bitmap was rendered for. Draw the bitmap here, not at the
-    /// un-rounded `h_pos`, or it will be blurry.
-    pub x_px: i32,
-}
-
-/// A glyph from a [`GlyphRasterizer`], allocated in the atlas.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RasterGlyphAllocation {
-    pub allocation: GlyphAllocation,
-    pub advance_px: f32,
-}
 
 // ----------------------------------------------------------------------------
 
@@ -213,7 +157,7 @@ pub(crate) struct GlyphAtlas {
     /// Glyphs from the [`GlyphRasterizer`]s.
     ///
     /// `None` means no rasterizer of that priority could handle the cluster.
-    raster_glyphs: IntMap<RasterGlyphKey, Option<RasterGlyphAllocation>>,
+    raster_glyphs: IntMap<RasterGlyphKey, Option<GlyphWithAdvance>>,
 }
 
 impl GlyphAtlas {
@@ -246,13 +190,6 @@ impl GlyphAtlas {
     #[inline]
     pub fn fill_ratio(&self) -> f32 {
         self.atlas.fill_ratio()
-    }
-
-    /// Forget every glyph and start over with an empty atlas.
-    ///
-    /// Anything holding a [`UvRect`] into the old atlas (e.g. a cached galley) is now stale.
-    pub fn clear(&mut self) {
-        *self = Self::new(*self.atlas.options());
     }
 
     /// Forget what the [`GlyphRasterizer`]s produced, e.g. because they were replaced.
@@ -305,11 +242,11 @@ impl GlyphAtlas {
             face.rasterize_glyph(metrics, glyph_id, bin)
                 .and_then(|bitmap| {
                     let transfer = Self::transfer_function(atlas, bitmap.is_color);
-                    let mut uv_rect =
+                    let mut geometry =
                         Self::allocate_bitmap(atlas, &bitmap, metrics.pixels_per_point, transfer)?;
-                    uv_rect.offset.y += metrics.y_offset_in_points;
+                    geometry.offset.y += metrics.y_offset_in_points;
                     Some(GlyphAllocation {
-                        uv_rect,
+                        geometry,
                         is_color: bitmap.is_color,
                     })
                 })
@@ -335,7 +272,7 @@ impl GlyphAtlas {
         family: &FontFamily,
         pixels_per_point: f32,
         font_size: f32,
-    ) -> Option<RasterGlyphAllocation> {
+    ) -> Option<GlyphWithAdvance> {
         let key = RasterGlyphKey::new(priority, cluster, family, pixels_per_point, font_size);
         if let Some(allocation) = self.raster_glyphs.get(&key) {
             return *allocation;
@@ -353,15 +290,49 @@ impl GlyphAtlas {
             .and_then(|RasterizedGlyph { bitmap, advance_px }| {
                 let is_color = bitmap.is_color;
                 let transfer = Self::transfer_function(&self.atlas, is_color);
-                let uv_rect =
+                let geometry =
                     Self::allocate_bitmap(&mut self.atlas, &bitmap, pixels_per_point, transfer)?;
-                Some(RasterGlyphAllocation {
-                    allocation: GlyphAllocation { uv_rect, is_color },
+                Some(GlyphWithAdvance {
+                    allocation: GlyphAllocation { geometry, is_color },
                     advance_px,
                 })
             });
         self.raster_glyphs.insert(key, allocation);
         allocation
+    }
+
+    /// A cached hollow box for a family without a font.
+    pub fn missing_glyph(
+        &mut self,
+        family: &FontFamily,
+        font_size: f32,
+        pixels_per_point: f32,
+    ) -> GlyphWithAdvance {
+        let key = RasterGlyphKey::new(
+            FontPriority::Lowest,
+            SYNTHETIC_TOFU_KEY,
+            family,
+            pixels_per_point,
+            font_size,
+        );
+        let allocation = self.raster_glyphs.entry(key).or_insert_with(|| {
+            let RasterizedGlyph { bitmap, advance_px } =
+                synthetic_tofu(font_size * pixels_per_point);
+            let transfer = Self::transfer_function(&self.atlas, false);
+            let geometry =
+                Self::allocate_bitmap(&mut self.atlas, &bitmap, pixels_per_point, transfer)?;
+            Some(GlyphWithAdvance {
+                allocation: GlyphAllocation {
+                    geometry,
+                    is_color: false,
+                },
+                advance_px,
+            })
+        });
+        allocation.unwrap_or(GlyphWithAdvance {
+            allocation: GlyphAllocation::default(),
+            advance_px: 0.0,
+        })
     }
 
     /// The transfer function assumes white coverage glyphs and discards color,
@@ -381,13 +352,13 @@ impl GlyphAtlas {
     /// Never fails for lack of space: the [`TextureAtlas`] grows in height as needed,
     /// and once it hits its maximum it logs a warning and starts overwriting old glyphs
     /// (see [`TextureAtlas::allocate`]). We avoid getting there because `Fonts::begin_pass`
-    /// calls [`Self::clear`] as soon as [`Self::fill_ratio`] passes 80%.
+    /// replaces the cache as soon as [`Self::fill_ratio`] passes 80%.
     fn allocate_bitmap(
         atlas: &mut TextureAtlas,
         bitmap: &GlyphBitmap,
         pixels_per_point: f32,
         transfer: FontColorTransferFunction,
-    ) -> Option<UvRect> {
+    ) -> Option<GlyphGeometry> {
         let [width, height] = bitmap.image.resolution();
         if width == 0 || height == 0 || MAX_GLYPH_SIZE < width || MAX_GLYPH_SIZE < height {
             return None;
@@ -399,11 +370,49 @@ impl GlyphAtlas {
                     transfer.to_atlas_color(bitmap.image[(x, y)]);
             }
         }
-        Some(UvRect {
+        Some(GlyphGeometry {
             offset: bitmap.offset_px / pixels_per_point,
             size: vec2(width as f32, height as f32) / pixels_per_point,
-            min: [glyph_pos.0 as u16, glyph_pos.1 as u16],
-            max: [(glyph_pos.0 + width) as u16, (glyph_pos.1 + height) as u16],
+            location: GlyphLocation::Bitmap {
+                min: [glyph_pos.0 as u16, glyph_pos.1 as u16],
+                max: [(glyph_pos.0 + width) as u16, (glyph_pos.1 + height) as u16],
+            },
         })
+    }
+}
+
+/// Cache key for the synthetic tofu box in the atlas.
+///
+/// Never a real grapheme cluster, so it cannot collide with one.
+const SYNTHETIC_TOFU_KEY: &str = "";
+
+/// A hollow box the size of a typical glyph, standing on the baseline.
+///
+/// Drawn for a character when no font has it and the family has no
+/// primary font whose `.notdef` glyph we could draw instead.
+fn synthetic_tofu(font_size_px: f32) -> RasterizedGlyph {
+    let width = (0.5 * font_size_px).round().max(2.0) as usize;
+    let height = (0.7 * font_size_px).round().max(2.0) as usize;
+    let stroke = (font_size_px / 14.0).round().max(1.0) as usize;
+    let side_bearing = (0.1 * font_size_px).round();
+
+    let mut image = ColorImage::filled([width, height], Color32::TRANSPARENT);
+    for y in 0..height {
+        for x in 0..width {
+            let on_edge = x < stroke || width - stroke <= x || y < stroke || height - stroke <= y;
+            if on_edge {
+                image[(x, y)] = Color32::WHITE;
+            }
+        }
+    }
+
+    RasterizedGlyph {
+        bitmap: GlyphBitmap {
+            image,
+            // The pen is at the baseline; the box stands on it.
+            offset_px: emath::vec2(side_bearing, -(height as f32)),
+            is_color: false,
+        },
+        advance_px: width as f32 + 2.0 * side_bearing,
     }
 }

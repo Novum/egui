@@ -17,10 +17,23 @@ pub struct Vertex {
     /// Normalized texture coordinates.
     /// (0, 0) is the top left corner of the texture.
     /// (1, 1) is the bottom right corner of the texture.
+    /// For vector glyphs, this stores the screen-space X basis instead.
     pub uv: Pos2, // 64 bit
 
     /// sRGBA with premultiplied alpha
     pub color: Color32, // 32 bit
+
+    /// Screen-space Y basis of a vector glyph's undilated box, in points.
+    /// The X basis is stored in `uv`. Transform both together with `pos`.
+    /// Zero for ordinary textured vertices.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub glyph_basis_y: Vec2,
+
+    /// Band record origin, with X biased by one and Y in the low 14 bits.
+    /// Bits 14 and 15 of Y store the quad corner's X and Y coordinates (0 or 1).
+    /// Zero X selects ordinary texture sampling.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub glyph_origin: [u16; 2],
 }
 
 impl Vertex {
@@ -31,6 +44,8 @@ impl Vertex {
             pos,
             uv: WHITE_UV,
             color,
+            glyph_basis_y: Vec2::ZERO,
+            glyph_origin: [0; 2],
         }
     }
 }
@@ -51,7 +66,20 @@ pub struct Vertex {
     /// Normalized texture coordinates.
     /// (0, 0) is the top left corner of the texture.
     /// (1, 1) is the bottom right corner of the texture.
+    /// For vector glyphs, this stores the screen-space X basis instead.
     pub uv: Pos2, // 64 bit
+
+    /// Screen-space Y basis of a vector glyph's undilated box, in points.
+    /// The X basis is stored in `uv`. Transform both together with `pos`.
+    /// Zero for ordinary textured vertices.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub glyph_basis_y: Vec2,
+
+    /// Band record origin, with X biased by one and Y in the low 14 bits.
+    /// Bits 14 and 15 of Y store the quad corner's X and Y coordinates (0 or 1).
+    /// Zero X selects ordinary texture sampling.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub glyph_origin: [u16; 2],
 }
 
 /// Textured triangles in two dimensions.
@@ -207,21 +235,29 @@ impl Mesh {
                 pos: rect.left_top(),
                 uv: uv.left_top(),
                 color,
+                glyph_basis_y: Vec2::ZERO,
+                glyph_origin: [0; 2],
             },
             Vertex {
                 pos: rect.right_top(),
                 uv: uv.right_top(),
                 color,
+                glyph_basis_y: Vec2::ZERO,
+                glyph_origin: [0; 2],
             },
             Vertex {
                 pos: rect.left_bottom(),
                 uv: uv.left_bottom(),
                 color,
+                glyph_basis_y: Vec2::ZERO,
+                glyph_origin: [0; 2],
             },
             Vertex {
                 pos: rect.right_bottom(),
                 uv: uv.right_bottom(),
                 color,
+                glyph_basis_y: Vec2::ZERO,
+                glyph_origin: [0; 2],
             },
         ]);
     }
@@ -316,6 +352,10 @@ impl Mesh {
     pub fn transform(&mut self, transform: TSTransform) {
         for v in &mut self.vertices {
             v.pos = transform * v.pos;
+            if v.glyph_origin[0] != 0 {
+                v.uv = (v.uv.to_vec2() * transform.scaling).to_pos2();
+                v.glyph_basis_y *= transform.scaling;
+            }
         }
     }
 
@@ -325,6 +365,10 @@ impl Mesh {
     pub fn rotate(&mut self, rot: Rot2, origin: Pos2) {
         for v in &mut self.vertices {
             v.pos = origin + rot * (v.pos - origin);
+            if v.glyph_origin[0] != 0 {
+                v.uv = (rot * v.uv.to_vec2()).to_pos2();
+                v.glyph_basis_y = rot * v.glyph_basis_y;
+            }
         }
     }
 }

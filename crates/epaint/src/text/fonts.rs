@@ -1,17 +1,17 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    Color32, ColorImage, TextureAtlas,
+    Color32, TextureAtlas,
     text::{
         FontDefinitions, FontFamily, FontId, FontInsert, FontPriority, FontProvider, Galley,
-        GlyphBitmap, GlyphRasterizer, GlyphRasterizerRequest, LayoutJob, RasterizedGlyph,
-        TextOptions, VariationCoords,
+        GlyphRasterizer, LayoutJob, TextOptions, VariationCoords,
         face_store::{FaceStore, FontFaceKey},
         family::{Family, FamilyKey},
         font_face::{FontFace, GlyphInfo, ShapedGlyph},
         font_provider::FontProviders,
         galley_cache::GalleyCache,
-        glyph_atlas::{GlyphAllocation, GlyphAtlas, OutlineGlyph, RasterGlyphAllocation},
+        glyph::{GlyphWithAdvance, OutlineGlyph},
+        glyph_atlas::GlyphAtlas,
         styled_metrics::StyledMetrics,
         text_layout::layout,
     },
@@ -175,12 +175,8 @@ impl Fonts {
     /// This function will react to changes in [`TextOptions`],
     /// as well as notice when the font atlas is getting full, and handle that.
     pub fn begin_pass(&mut self, options: TextOptions, viewport_key: ViewportKey) {
-        if self.fonts.options() != &options {
+        if self.fonts.options() != &options || 0.8 < self.fonts.fill_ratio() {
             self.fonts.set_options(options);
-            self.galley_caches.clear(); // Galleys point into the old atlas.
-        } else if 0.8 < self.fonts.glyphs.fill_ratio() {
-            // The parsed faces are still fine; only the bitmaps need to go.
-            self.fonts.glyphs.clear();
             self.galley_caches.clear(); // Galleys point into the old atlas.
         }
 
@@ -203,6 +199,20 @@ impl Fonts {
     /// Call at the end of each frame (before painting) to get the change to the font texture since last call.
     pub fn font_image_delta(&mut self) -> Option<crate::ImageDelta> {
         self.fonts.glyphs.take_delta()
+    }
+
+    /// Take vector-font updates, including a release command when selecting bitmap rendering.
+    pub fn font_textures_delta(&mut self) -> Option<crate::textures::TexturesDelta> {
+        let changed = core::mem::take(&mut self.fonts.mode_dirty);
+        match &mut self.fonts.vector_glyphs {
+            Some(glyphs) => glyphs.take_delta(),
+            None => changed.then(|| {
+                let mut delta = crate::textures::TexturesDelta::default();
+                delta.free(crate::TextureId::FontCurves);
+                delta.free(crate::TextureId::FontBands);
+                delta
+            }),
+        }
     }
 
     #[inline]
@@ -266,7 +276,7 @@ impl Fonts {
     /// This increases as new fonts and/or glyphs are used,
     /// but can also decrease in a call to [`Self::begin_pass`].
     pub fn font_atlas_fill_ratio(&self) -> f32 {
-        self.fonts.glyphs.fill_ratio()
+        self.fonts.fill_ratio()
     }
 
     /// Lay out some text, bypassing the galley cache.
@@ -435,7 +445,7 @@ impl FontsView<'_> {
     /// This increases as new fonts and/or glyphs are used,
     /// but can also decrease in a call to [`Fonts::begin_pass`].
     pub fn font_atlas_fill_ratio(&self) -> f32 {
-        self.fonts.glyphs.fill_ratio()
+        self.fonts.fill_ratio()
     }
 
     /// Will wrap text at the given width and line break at `\n`.
@@ -484,6 +494,8 @@ impl FontsView<'_> {
 pub(crate) struct FontsImpl {
     definitions: Arc<FontDefinitions>,
     glyphs: GlyphAtlas,
+    vector_glyphs: Option<super::vector::Cache>,
+    mode_dirty: bool,
     faces: FaceStore,
 
     /// Indexed by [`FamilyKey`].
@@ -498,11 +510,6 @@ pub(crate) struct FontsImpl {
     font_providers: FontProviders,
 
     missing_glyph_policy: MissingGlyphPolicy,
-
-    /// Draws the synthetic tofu box for families that have no font at all.
-    ///
-    /// Kept as a [`GlyphRasterizer`] so its glyphs share the atlas cache with the other rasterized glyphs.
-    synthetic_tofu: GlyphRasterizer,
 }
 
 impl FontsImpl {
@@ -512,6 +519,9 @@ impl FontsImpl {
         let mut slf = Self {
             definitions: Arc::new(definitions),
             glyphs: GlyphAtlas::new(options),
+            vector_glyphs: (options.font_rendering == super::FontRendering::Vector)
+                .then(|| super::vector::Cache::new(options)),
+            mode_dirty: true,
             faces: FaceStore::new(options),
             families: Default::default(),
             family_keys: Default::default(),
@@ -519,10 +529,6 @@ impl FontsImpl {
             glyph_rasterizers: Vec::new(),
             font_providers: Default::default(),
             missing_glyph_policy: Default::default(),
-            synthetic_tofu: GlyphRasterizer::new(
-                "epaint::synthetic_tofu",
-                |request: &GlyphRasterizerRequest<'_>| Some(synthetic_tofu(request.font_size_px)),
-            ),
         };
         slf.set_font_providers(Vec::new());
         slf
@@ -544,12 +550,22 @@ impl FontsImpl {
         self.font_providers.discovered()
     }
 
-    /// Apply new [`TextOptions`].
-    ///
-    /// The parsed faces and the fallback chains survive; only the atlas starts over.
+    /// The highest occupancy of the active font textures.
+    pub fn fill_ratio(&self) -> f32 {
+        self.glyphs.fill_ratio().max(
+            self.vector_glyphs
+                .as_ref()
+                .map_or(0.0, super::vector::Cache::fill_ratio),
+        )
+    }
+
+    /// Apply text options and discard cached glyph data. Parsed faces and fallback chains survive.
     pub fn set_options(&mut self, options: TextOptions) {
         self.faces.set_options(options);
         self.glyphs = GlyphAtlas::new(options);
+        self.vector_glyphs = (options.font_rendering == super::FontRendering::Vector)
+            .then(|| super::vector::Cache::new(options));
+        self.mode_dirty = true;
     }
 
     /// Also use this glyph rasterizer.
@@ -749,8 +765,12 @@ impl FontsImpl {
         let Some(face) = self.faces.get_mut(face_key) else {
             return Default::default();
         };
-        self.glyphs
-            .allocate_outline(face_key, face, metrics, shaped)
+        if let Some(glyphs) = &mut self.vector_glyphs {
+            glyphs.allocate_glyph(face_key, face, metrics, shaped)
+        } else {
+            self.glyphs
+                .allocate_outline(face_key, face, metrics, shaped)
+        }
     }
 
     /// Rasterize a grapheme cluster using the [`GlyphRasterizer`]s of the given priority.
@@ -763,7 +783,7 @@ impl FontsImpl {
         cluster: &str,
         pixels_per_point: f32,
         font_size: f32,
-    ) -> Option<RasterGlyphAllocation> {
+    ) -> Option<GlyphWithAdvance> {
         if !self.has_glyph_rasterizer(priority) {
             return None;
         }
@@ -819,7 +839,7 @@ impl FontsImpl {
         cluster: &str,
         pixels_per_point: f32,
         font_size: f32,
-    ) -> RasterGlyphAllocation {
+    ) -> GlyphWithAdvance {
         if let Some(raster) = self.rasterize_cluster(
             FontPriority::Lowest,
             family,
@@ -833,58 +853,12 @@ impl FontsImpl {
         self.on_missing_glyph(family, cluster);
 
         let family_name = self.families[family.0].name();
-        self.glyphs
-            .allocate_raster(
-                core::iter::once(&self.synthetic_tofu),
-                FontPriority::Lowest,
-                SYNTHETIC_TOFU_KEY,
-                family_name,
-                pixels_per_point,
-                font_size,
-            )
-            .unwrap_or_else(|| {
-                // Only if the atlas cannot hold a tiny box: advance, but draw nothing.
-                RasterGlyphAllocation {
-                    allocation: GlyphAllocation::default(),
-                    advance_px: 0.0,
-                }
-            })
-    }
-}
-
-/// Cache key for the synthetic tofu box in the atlas.
-///
-/// Never a real grapheme cluster, so it cannot collide with one.
-const SYNTHETIC_TOFU_KEY: &str = "";
-
-/// A hollow box the size of a typical glyph, standing on the baseline.
-///
-/// Drawn for a character when no font has it and the family has no
-/// primary font whose `.notdef` glyph we could draw instead.
-fn synthetic_tofu(font_size_px: f32) -> RasterizedGlyph {
-    let width = (0.5 * font_size_px).round().max(2.0) as usize;
-    let height = (0.7 * font_size_px).round().max(2.0) as usize;
-    let stroke = (font_size_px / 14.0).round().max(1.0) as usize;
-    let side_bearing = (0.1 * font_size_px).round();
-
-    let mut image = ColorImage::filled([width, height], Color32::TRANSPARENT);
-    for y in 0..height {
-        for x in 0..width {
-            let on_edge = x < stroke || width - stroke <= x || y < stroke || height - stroke <= y;
-            if on_edge {
-                image[(x, y)] = Color32::WHITE;
-            }
+        if let Some(glyphs) = &mut self.vector_glyphs {
+            glyphs.missing_glyph(font_size, pixels_per_point)
+        } else {
+            self.glyphs
+                .missing_glyph(family_name, font_size, pixels_per_point)
         }
-    }
-
-    RasterizedGlyph {
-        bitmap: GlyphBitmap {
-            image,
-            // The pen is at the baseline; the box stands on it.
-            offset_px: emath::vec2(side_bearing, -(height as f32)),
-            is_color: false,
-        },
-        advance_px: width as f32 + 2.0 * side_bearing,
     }
 }
 

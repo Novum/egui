@@ -989,6 +989,8 @@ fn fill_closed_path_with_uv(
                 pos,
                 uv: uv_from_pos(pos),
                 color,
+                glyph_basis_y: Vec2::ZERO,
+                glyph_origin: [0; 2],
             });
 
             let pos = p1.pos + dm;
@@ -996,6 +998,8 @@ fn fill_closed_path_with_uv(
                 pos,
                 uv: uv_from_pos(pos),
                 color: color_outer,
+                glyph_basis_y: Vec2::ZERO,
+                glyph_origin: [0; 2],
             });
 
             out.add_triangle(idx_inner + i1 * 2, idx_inner + i0 * 2, idx_outer + 2 * i0);
@@ -1009,6 +1013,8 @@ fn fill_closed_path_with_uv(
             pos: p.pos,
             uv: uv_from_pos(p.pos),
             color,
+            glyph_basis_y: Vec2::ZERO,
+            glyph_origin: [0; 2],
         }));
         for i in 2..n {
             out.add_triangle(idx, idx + i - 1, idx + i);
@@ -1546,12 +1552,17 @@ impl Tessellator {
                 // Tessellate in the shape's own coordinate space, so that everything lands on the
                 // pixel grid there, and only then move the finished vertices into place.
                 // Culling has to happen in that same space, so map the clip rect back into it:
-                self.clip_rect = transform.inverse() * clip_rect;
+                self.clip_rect = (transform.inverse() * clip_rect)
+                    .expand(2.0 / (self.pixels_per_point * transform.scaling.abs()).max(1e-20));
 
                 let vertex_start = out_mesh.vertices.len();
                 self.tessellate_shape(shape, out_mesh);
                 for vertex in &mut out_mesh.vertices[vertex_start..] {
                     vertex.pos = transform * vertex.pos;
+                    if vertex.glyph_origin[0] != 0 {
+                        vertex.uv = (vertex.uv.to_vec2() * transform.scaling).to_pos2();
+                        vertex.glyph_basis_y *= transform.scaling;
+                    }
                 }
             }
         } else {
@@ -1589,7 +1600,9 @@ impl Tessellator {
                 // note: `append` still checks if the mesh is valid if extra asserts are enabled.
 
                 if self.options.coarse_tessellation_culling
-                    && !self.clip_rect.intersects(mesh.calc_bounds())
+                    && !self
+                        .clip_rect
+                        .intersects(mesh.calc_bounds().expand(2.0 / self.pixels_per_point))
                 {
                     return;
                 }
@@ -1771,7 +1784,9 @@ impl Tessellator {
         }
 
         if self.options.coarse_tessellation_culling
-            && !self.clip_rect.intersects(mesh.calc_bounds())
+            && !self
+                .clip_rect
+                .intersects(mesh.calc_bounds().expand(2.0 / self.pixels_per_point))
         {
             return;
         }
@@ -2244,7 +2259,13 @@ impl Tessellator {
             return;
         }
 
-        if galley.pixels_per_point != self.pixels_per_point {
+        if galley.pixels_per_point != self.pixels_per_point
+            && galley.rows.iter().any(|row| {
+                row.glyphs
+                    .iter()
+                    .any(|glyph| !glyph.geometry.is_vector() && !glyph.geometry.is_nothing())
+            })
+        {
             log::warn!(
                 "epaint: WARNING: pixels_per_point (dpi scale) have changed between text layout and tessellation. \
                        You must recreate your text shapes if pixels_per_point changes."
@@ -2282,7 +2303,11 @@ impl Tessellator {
             }
             row_rect = row_rect.translate(final_row_pos.to_vec2());
 
-            if self.options.coarse_tessellation_culling && !self.clip_rect.intersects(row_rect) {
+            if self.options.coarse_tessellation_culling
+                && !self
+                    .clip_rect
+                    .intersects(row_rect.expand(2.0 / self.pixels_per_point))
+            {
                 // culling individual lines of text is important, since a single `Shape::Text`
                 // can span hundreds of lines.
                 continue;
@@ -2307,7 +2332,11 @@ impl Tessellator {
                 glyph_index
                     .checked_sub(1)
                     .and_then(|glyph_index| row.glyphs.get(glyph_index))
-                    .is_some_and(|glyph| glyph.is_color && !glyph.uv_rect.is_nothing())
+                    .is_some_and(|glyph| {
+                        glyph.is_color
+                            && !glyph.geometry.is_vector()
+                            && !glyph.geometry.is_nothing()
+                    })
             };
 
             out.indices.extend(
@@ -2325,7 +2354,7 @@ impl Tessellator {
                     .iter()
                     .enumerate()
                     .map(|(i, vertex)| {
-                        let Vertex { pos, uv, mut color } = *vertex;
+                        let Vertex { pos, uv, mut color, glyph_basis_y, glyph_origin } = *vertex;
 
                         if let Some(override_text_color) = override_text_color {
                             // Only override the glyph color (not background color, strike-through color, etc)
@@ -2355,8 +2384,10 @@ impl Tessellator {
 
                         Vertex {
                             pos: final_row_pos + offset,
-                            uv: (uv.to_vec2() * uv_normalizer).to_pos2(),
+                            uv: if glyph_origin[0] != 0 { (rotator * uv.to_vec2()).to_pos2() } else { (uv.to_vec2() * uv_normalizer).to_pos2() },
                             color,
+                            glyph_basis_y: rotator * glyph_basis_y,
+                            glyph_origin,
                         }
                     }),
             );

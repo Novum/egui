@@ -268,6 +268,10 @@ pub struct InputState {
     /// This depends on the backend.
     pub max_texture_side: usize,
 
+    /// Whether the renderer supports vector fonts. Defaults to `true`.
+    /// Updated through [`RawInput::vector_fonts`].
+    pub vector_fonts: bool,
+
     /// Time in seconds. Relative to whatever. Used for animation.
     pub time: f64,
 
@@ -348,6 +352,7 @@ impl Default for InputState {
             safe_area_insets: Default::default(),
             pixels_per_point: 1.0,
             max_texture_side: 2048,
+            vector_fonts: true,
             time: 0.0,
             unstable_dt: 1.0 / 60.0,
             predicted_dt: 1.0 / 60.0,
@@ -483,6 +488,7 @@ impl InputState {
             safe_area_insets,
             pixels_per_point,
             max_texture_side: new.max_texture_side.unwrap_or(self.max_texture_side),
+            vector_fonts: new.vector_fonts.unwrap_or(self.vector_fonts),
             time,
             unstable_dt,
             predicted_dt: new.predicted_dt,
@@ -1637,6 +1643,7 @@ impl InputState {
             safe_area_insets,
             pixels_per_point,
             max_texture_side,
+            vector_fonts,
             time,
             unstable_dt,
             predicted_dt,
@@ -1684,6 +1691,7 @@ impl InputState {
         ui.label(format!(
             "max texture size (on each side): {max_texture_side}"
         ));
+        ui.label(format!("vector fonts: {vector_fonts}"));
         ui.label(format!("time: {time:.3} s"));
         ui.label(format!(
             "time since previous frame: {:.1} ms",

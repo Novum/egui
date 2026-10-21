@@ -3,7 +3,7 @@ use core::{ops::Range, str::FromStr as _};
 
 use super::{
     cursor::{CCursor, LayoutCursor},
-    glyph_atlas::UvRect,
+    glyph::GlyphGeometry,
     index::{ByteIndex, ByteRange, ByteRangeExt as _, CharIndex},
 };
 use crate::{Color32, FontId, Mesh, Stroke, text::FontsView};
@@ -863,6 +863,7 @@ pub struct Row {
 pub struct RowVisuals {
     /// The tessellated text, using non-normalized (texel) UV coordinates.
     /// That is, you need to divide the uv coordinates by the texture size.
+    /// Vector glyph vertices use local [0, 1] UVs and must stay unnormalized.
     pub mesh: Mesh,
 
     /// Bounds of the mesh, and can be used for culling.
@@ -923,8 +924,8 @@ pub struct Glyph {
     /// The row/line height of the sub-font within the font (`FontFace`).
     pub font_face_height: f32,
 
-    /// Position and size of the glyph in the font texture, in texels.
-    pub uv_rect: UvRect,
+    /// Glyph placement in points and its bitmap or vector texture location.
+    pub geometry: GlyphGeometry,
 
     /// Whether this glyph carries its own color, e.g. a color emoji.
     pub is_color: bool,

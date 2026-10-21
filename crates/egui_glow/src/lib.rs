@@ -13,6 +13,7 @@
 pub mod painter;
 pub use glow;
 pub use painter::{CallbackFn, Painter, PainterError};
+mod font_textures;
 mod misc_util;
 mod shader_version;
 mod vao;

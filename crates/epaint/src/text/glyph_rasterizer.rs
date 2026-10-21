@@ -62,6 +62,9 @@ type RasterizeFn =
 /// e.g. to always render `…` your own way.
 /// Return `None` quickly for everything you do not want to override.
 ///
+/// Rasterizers work in both font rendering modes. Their results are stored as bitmaps,
+/// including when font outlines are rendered as vectors.
+///
 /// Several rasterizers can be installed. Within a priority tier
 /// they are asked in the order they were added, and the first to return `Some` wins.
 ///

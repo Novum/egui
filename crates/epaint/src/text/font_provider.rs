@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(fonts.discovered_fonts().len(), 1);
 
         let glyph = first_glyph(&mut fonts, SCHWA);
-        assert!(!glyph.uv_rect.is_nothing());
+        assert!(!glyph.geometry.is_nothing());
         assert!(!glyph.is_color);
         assert_eq!(requests.lock().len(), 1);
 

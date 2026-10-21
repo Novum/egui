@@ -11,6 +11,7 @@ mod font_provider;
 mod font_tweak;
 mod fonts;
 mod galley_cache;
+mod glyph;
 mod glyph_atlas;
 mod glyph_rasterizer;
 mod index;
@@ -18,6 +19,10 @@ mod styled_metrics;
 mod text_layout;
 mod text_layout_types;
 mod unicode;
+mod vector;
+#[cfg(feature = "color_fonts")]
+mod vector_color;
+mod vector_texture;
 
 pub use {
     font_data::{Blob, FontData, FontVariationAxis},
@@ -26,6 +31,7 @@ pub use {
     font_provider::{FallbackRequest, FontProvider},
     font_tweak::{FontTweak, HintingTarget, SmoothHinting},
     fonts::{Fonts, FontsView, MAX_GLYPH_SIZE, MissingGlyphPolicy, ViewportKey},
+    glyph::{GlyphGeometry, GlyphLocation},
     glyph_rasterizer::{
         GlyphBitmap, GlyphRasterizer, GlyphRasterizerRequest, RasterizedGlyph,
         has_emoji_presentation,
@@ -37,24 +43,43 @@ pub use {
 /// Suggested character to use to replace those in password text fields.
 pub const PASSWORD_REPLACEMENT_CHAR: char = '•';
 
+/// How installed font outlines are painted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub enum FontRendering {
+    /// Evaluate quadratic outlines on the GPU from cached curves.
+    /// Requires a backend that implements the curve vertex attributes.
+    #[default]
+    Vector,
+
+    /// Rasterize outlines into the font texture on the CPU.
+    Bitmap,
+}
+
 /// Controls how we render text
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct TextOptions {
+    /// How installed outlines are rendered. Both bundled GPU backends support Vector.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub font_rendering: FontRendering,
+
     /// Maximum size of the font texture.
     pub max_texture_side: usize,
 
     /// Controls how to convert glyph colors when writing to the font atlas.
     pub color_transfer_function: crate::FontColorTransferFunction,
 
-    /// Whether to enable font hinting
+    /// Whether to enable font hinting for bitmap outlines.
+    /// Vector caches unhinted font-unit curves and ignores this setting.
     ///
     /// (round some font coordinates to pixels for sharper text).
     ///
     /// Default is `true`.
     pub font_hinting: bool,
 
-    /// Enable sub-pixel binning for glyphs.
+    /// Enable sub-pixel binning for bitmap glyphs.
+    /// Vector positions curves continuously without duplicating cached geometry.
     ///
     /// Sub-pixel binning renders each glyph at up to four fractional horizontal offsets,
     /// giving more even kerning at the cost of more atlas space.
@@ -72,6 +97,7 @@ pub struct TextOptions {
 impl Default for TextOptions {
     fn default() -> Self {
         Self {
+            font_rendering: FontRendering::Vector,
             max_texture_side: 2048, // Small but portable
             color_transfer_function: crate::FontColorTransferFunction::default(),
             font_hinting: true,

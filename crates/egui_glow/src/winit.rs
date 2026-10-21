@@ -37,7 +37,7 @@ impl EguiGlow {
 
         let egui_ctx = egui::Context::default();
 
-        let egui_winit = egui_winit::State::new(
+        let mut egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
             ViewportId::ROOT,
             event_loop,
@@ -45,6 +45,8 @@ impl EguiGlow {
             event_loop.system_theme(),
             Some(painter.max_texture_side()),
         );
+
+        egui_winit.egui_input_mut().vector_fonts = Some(painter.supports_vector_fonts());
 
         Self {
             egui_ctx,

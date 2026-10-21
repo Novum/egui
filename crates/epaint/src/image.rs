@@ -8,14 +8,27 @@ use alloc::sync::Arc;
 ///
 /// To load an image file, see [`ColorImage::from_rgba_unmultiplied`].
 ///
-/// This is currently an enum with only one variant, but more image types may be added in the future.
+/// Numeric textures contain shader data, rather than displayable colors.
+/// They require [`TextureOptions::NEAREST`] and are uploaded without color conversion.
 ///
 /// See also: [`ColorImage`].
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum ImageData {
     /// RGBA image.
     Color(Arc<ColorImage>),
+
+    /// Four 32-bit floating-point components per texel, in row-major order.
+    Rgba32Float {
+        resolution: [usize; 2],
+        pixels: Arc<[[f32; 4]]>,
+    },
+
+    /// Four 32-bit unsigned-integer components per texel, in row-major order.
+    Rgba32Uint {
+        resolution: [usize; 2],
+        pixels: Arc<[[u32; 4]]>,
+    },
 }
 
 impl ImageData {
@@ -24,6 +37,9 @@ impl ImageData {
     pub fn resolution(&self) -> [usize; 2] {
         match self {
             Self::Color(image) => image.resolution,
+            Self::Rgba32Float { resolution, .. } | Self::Rgba32Uint { resolution, .. } => {
+                *resolution
+            }
         }
     }
 
@@ -45,6 +61,7 @@ impl ImageData {
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             Self::Color(_) => 4,
+            Self::Rgba32Float { .. } | Self::Rgba32Uint { .. } => 16,
         }
     }
 }
@@ -506,7 +523,7 @@ impl FontColorTransferFunction {
 /// A change to an image.
 ///
 /// Either a whole new image, or an update to a rectangular region of it.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[must_use = "The painter must take care of this"]
 pub struct ImageDelta {

@@ -112,6 +112,12 @@ pub enum TextureId {
     /// Your own texture, defined in any which way you want.
     /// The backend renderer will presumably use this to look up what texture to use.
     User(u64),
+
+    /// Vector-font curves, stored as RGBA32 float texels.
+    FontCurves,
+
+    /// Vector-font band and paint records, stored as RGBA32 unsigned-integer texels.
+    FontBands,
 }
 
 impl Default for TextureId {

@@ -19,6 +19,7 @@
 pub use wgpu;
 
 /// Low-level painting of [`egui`](https://github.com/emilk/egui) on [`wgpu`].
+mod font_textures;
 mod renderer;
 
 mod setup;

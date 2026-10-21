@@ -44,6 +44,13 @@ pub struct RawInput {
     /// The default is a very small (but very portable) 2048.
     pub max_texture_side: Option<usize>,
 
+    /// Whether the renderer supports vector fonts.
+    ///
+    /// `None` retains the previous value, which defaults to `true`.
+    /// Unsupported renderers must supply `Some(false)` before the first pass.
+    /// All viewports sharing a context must use a value supported by all their renderers.
+    pub vector_fonts: Option<bool>,
+
     /// Monotonically increasing time, in seconds. Relative to whatever. Used for animations.
     /// If `None` is provided, egui will assume a time delta of `predicted_dt` (default 1/60 seconds).
     pub time: Option<f64>,
@@ -98,6 +105,7 @@ impl Default for RawInput {
             viewports: core::iter::once((ViewportId::ROOT, Default::default())).collect(),
             screen_rect: None,
             max_texture_side: None,
+            vector_fonts: None,
             time: None,
             predicted_dt: 1.0 / 60.0,
             events: vec![],
@@ -132,6 +140,7 @@ impl RawInput {
             screen_rect: self.screen_rect.take(),
             safe_area_insets: self.safe_area_insets.take(),
             max_texture_side: self.max_texture_side.take(),
+            vector_fonts: self.vector_fonts.take(),
             time: self.time,
             predicted_dt: self.predicted_dt,
             events: core::mem::take(&mut self.events),
@@ -149,6 +158,7 @@ impl RawInput {
             viewports,
             screen_rect,
             max_texture_side,
+            vector_fonts,
             time,
             predicted_dt,
             mut events,
@@ -163,6 +173,7 @@ impl RawInput {
         self.viewports = viewports;
         self.screen_rect = screen_rect.or(self.screen_rect);
         self.max_texture_side = max_texture_side.or(self.max_texture_side);
+        self.vector_fonts = vector_fonts.or(self.vector_fonts);
         self.time = time; // use latest time
         self.predicted_dt = predicted_dt; // use latest dt
         self.events.append(&mut events);
@@ -181,6 +192,7 @@ impl RawInput {
             viewports,
             screen_rect,
             max_texture_side,
+            vector_fonts,
             time,
             predicted_dt,
             events,
@@ -207,6 +219,7 @@ impl RawInput {
         ui.label(format!("screen_rect: {screen_rect:?} points"));
 
         ui.label(format!("max_texture_side: {max_texture_side:?}"));
+        ui.label(format!("vector_fonts: {vector_fonts:?}"));
         if let Some(time) = time {
             ui.label(format!("time: {time:.3} s"));
         } else {

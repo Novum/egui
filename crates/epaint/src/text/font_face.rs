@@ -288,9 +288,9 @@ impl FontCell {
 }
 
 /// Collects a `skrifa` glyph outline into a `kurbo` path, flipping Y to point down.
-struct VelloPen<'a> {
-    path: &'a mut kurbo::BezPath,
-    x_offset: f64,
+pub(super) struct VelloPen<'a> {
+    pub(super) path: &'a mut kurbo::BezPath,
+    pub(super) x_offset: f64,
 }
 
 impl skrifa::outline::OutlinePen for VelloPen<'_> {
@@ -371,7 +371,8 @@ impl FontFace {
                 skrifa::instance::LocationRef::default(),
             );
 
-            let hinting_enabled = tweak.hinting.unwrap_or(options.font_hinting);
+            let hinting_enabled = options.font_rendering == super::FontRendering::Bitmap
+                && tweak.hinting.unwrap_or(options.font_hinting);
             let hinting_instance = hinting_enabled
                 .then(|| {
                     // It doesn't really matter what we put here for options. Since the size is `unscaled()`, we will
@@ -434,7 +435,8 @@ impl FontFace {
             ..
         } = self;
         *subpixel_binning = tweak.subpixel_binning.unwrap_or(options.subpixel_binning);
-        let hinting_enabled = tweak.hinting.unwrap_or(options.font_hinting);
+        let hinting_enabled = options.font_rendering == super::FontRendering::Bitmap
+            && tweak.hinting.unwrap_or(options.font_hinting);
         font.with_dependent_mut(|_, font_data| {
             font_data.hinting_instance = hinting_enabled
                 .then(|| {
@@ -660,6 +662,44 @@ impl FontFace {
         }
     }
 
+    #[cfg(feature = "color_fonts")]
+    pub(crate) fn color_layers(
+        &self,
+        metrics: &StyledMetrics,
+        glyph_id: GlyphId,
+    ) -> Option<Vec<super::vector::Layer>> {
+        super::vector_color::layers(
+            &self.font.borrow_dependent().skrifa,
+            glyph_id,
+            (&metrics.location).into(),
+        )
+    }
+
+    /// Unhinted geometry in font units, independent of size, DPI and pixel phase.
+    pub(crate) fn unscaled_outline_path(
+        &self,
+        metrics: &StyledMetrics,
+        glyph_id: GlyphId,
+    ) -> Option<kurbo::BezPath> {
+        let data = self.font.borrow_dependent();
+        let outline = data.outline_glyphs.get(glyph_id)?;
+        let mut path = kurbo::BezPath::new();
+        let mut pen = VelloPen {
+            path: &mut path,
+            x_offset: 0.0,
+        };
+        outline
+            .draw(
+                skrifa::outline::DrawSettings::unhinted(
+                    skrifa::instance::Size::unscaled(),
+                    &metrics.location,
+                ),
+                &mut pen,
+            )
+            .ok()?;
+        Some(path)
+    }
+
     /// Render a glyph to a bitmap: a color glyph if the font has one, else the outline as coverage.
     ///
     /// Not cached: see [`crate::text::glyph_atlas::GlyphAtlas::allocate_outline`].
@@ -685,4 +725,34 @@ pub(crate) struct ShapedGlyph {
 
     /// CJK glyphs skip subpixel positioning to save atlas space.
     pub is_cjk: bool,
+}
+
+#[cfg(test)]
+mod vector_mode_tests {
+    use super::*;
+
+    #[test]
+    fn vector_mode_releases_bitmap_hinting_state() {
+        let data =
+            crate::text::FontData::from_static(include_bytes!("../../tests/data/vector.ttf"));
+        let mut options = TextOptions::default();
+        let mut face = FontFace::new(
+            options,
+            "test".into(),
+            data.font,
+            0,
+            FontTweak {
+                hinting: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(face.font.borrow_dependent().hinting_instance.is_none());
+        options.font_rendering = super::super::FontRendering::Bitmap;
+        face.set_options(options);
+        assert!(face.font.borrow_dependent().hinting_instance.is_some());
+        options.font_rendering = super::super::FontRendering::Vector;
+        face.set_options(options);
+        assert!(face.font.borrow_dependent().hinting_instance.is_none());
+    }
 }
