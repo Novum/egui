@@ -256,6 +256,117 @@ vec4 vector_paint(ivec2 origin, uint base, vec2 coord, vec4 foreground) {
     return previous;
 }
 
+// W3C Compositing and Blending formulas for the COLR blend modes, on
+// unpremultiplied colors. `b` is the backdrop, `s` the source.
+float vector_blend_channel(float b, float s, uint mode) {
+    switch (mode) {
+        case 13u:
+            return b + s - b * s;
+        case 14u:
+            if (b <= 0.5) {
+                return s * 2.0 * b;
+            }
+            return s + (2.0 * b - 1.0) - s * (2.0 * b - 1.0);
+        case 15u:
+            return min(b, s);
+        case 16u:
+            return max(b, s);
+        case 17u:
+            if (b == 0.0) {
+                return 0.0;
+            }
+            if (s >= 1.0) {
+                return 1.0;
+            }
+            return min(1.0, b / (1.0 - s));
+        case 18u:
+            if (b >= 1.0) {
+                return 1.0;
+            }
+            if (s == 0.0) {
+                return 0.0;
+            }
+            return 1.0 - min(1.0, (1.0 - b) / s);
+        case 19u:
+            if (s <= 0.5) {
+                return b * 2.0 * s;
+            }
+            return b + (2.0 * s - 1.0) - b * (2.0 * s - 1.0);
+        case 20u: {
+            if (s <= 0.5) {
+                return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+            }
+            float d = b <= 0.25 ? ((16.0 * b - 12.0) * b + 4.0) * b : sqrt(b);
+            return b + (2.0 * s - 1.0) * (d - b);
+        }
+        case 21u:
+            return abs(b - s);
+        case 22u:
+            return b + s - 2.0 * b * s;
+        case 23u:
+            return b * s;
+        default:
+            return s;
+    }
+}
+
+float vector_lum(vec3 c) {
+    return dot(c, vec3(0.3, 0.59, 0.11));
+}
+
+vec3 vector_set_lum(vec3 c, float l) {
+    vec3 color = c + (l - vector_lum(c));
+    float lum = vector_lum(color);
+    float low = min(color.r, min(color.g, color.b));
+    float high = max(color.r, max(color.g, color.b));
+    if (low < 0.0) {
+        color = lum + (color - lum) * lum / max(lum - low, 1e-20);
+    }
+    if (high > 1.0) {
+        color = lum + (color - lum) * (1.0 - lum) / max(high - lum, 1e-20);
+    }
+    return color;
+}
+
+float vector_sat(vec3 c) {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+
+vec3 vector_set_sat(vec3 c, float s) {
+    float low = min(c.r, min(c.g, c.b));
+    float range = vector_sat(c);
+    if (range <= 0.0) {
+        return vec3(0.0);
+    }
+    return (c - low) * s / range;
+}
+
+vec4 vector_blend(vec4 source, vec4 destination, uint mode) {
+    vec3 s = clamp(source.rgb / max(source.a, 1e-20), 0.0, 1.0);
+    vec3 b = clamp(destination.rgb / max(destination.a, 1e-20), 0.0, 1.0);
+    vec3 blended;
+    if (mode == 24u) {
+        blended = vector_set_lum(vector_set_sat(s, vector_sat(b)), vector_lum(b));
+    } else if (mode == 25u) {
+        blended = vector_set_lum(vector_set_sat(b, vector_sat(s)), vector_lum(b));
+    } else if (mode == 26u) {
+        blended = vector_set_lum(s, vector_lum(b));
+    } else if (mode == 27u) {
+        blended = vector_set_lum(b, vector_lum(s));
+    } else {
+        blended = vec3(
+            vector_blend_channel(b.r, s.r, mode),
+            vector_blend_channel(b.g, s.g, mode),
+            vector_blend_channel(b.b, s.b, mode)
+        );
+    }
+    float both = source.a * destination.a;
+    return vec4(
+        source.rgb * (1.0 - destination.a) + destination.rgb * (1.0 - source.a) + both * blended,
+        source.a + destination.a - both
+    );
+}
+
 vec4 vector_composite(vec4 source, vec4 destination, uint mode) {
     switch (mode) {
         case 0u:
@@ -285,7 +396,7 @@ vec4 vector_composite(vec4 source, vec4 destination, uint mode) {
         case 12u:
             return min(source + destination, vec4(1.0));
         default:
-            return source;
+            return vector_blend(source, destination, mode);
     }
 }
 

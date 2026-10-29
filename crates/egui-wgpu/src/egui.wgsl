@@ -389,6 +389,140 @@ fn vector_paint(origin: vec2<i32>, base: u32, coord: vec2<f32>, foreground: vec4
     return previous;
 }
 
+// W3C Compositing and Blending formulas for the COLR blend modes, on
+// unpremultiplied colors. `b` is the backdrop, `s` the source.
+fn vector_blend_channel(b: f32, s: f32, mode: u32) -> f32 {
+    switch mode {
+        case 13u: {
+            return b + s - b * s;
+        }
+        case 14u: {
+            if b <= 0.5 {
+                return s * 2.0 * b;
+            }
+            let t = 2.0 * b - 1.0;
+            return s + t - s * t;
+        }
+        case 15u: {
+            return min(b, s);
+        }
+        case 16u: {
+            return max(b, s);
+        }
+        case 17u: {
+            if b == 0.0 {
+                return 0.0;
+            }
+            if s >= 1.0 {
+                return 1.0;
+            }
+            return min(1.0, b / (1.0 - s));
+        }
+        case 18u: {
+            if b >= 1.0 {
+                return 1.0;
+            }
+            if s == 0.0 {
+                return 0.0;
+            }
+            return 1.0 - min(1.0, (1.0 - b) / s);
+        }
+        case 19u: {
+            if s <= 0.5 {
+                return b * 2.0 * s;
+            }
+            let t = 2.0 * s - 1.0;
+            return b + t - b * t;
+        }
+        case 20u: {
+            if s <= 0.5 {
+                return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+            }
+            var d = sqrt(b);
+            if b <= 0.25 {
+                d = ((16.0 * b - 12.0) * b + 4.0) * b;
+            }
+            return b + (2.0 * s - 1.0) * (d - b);
+        }
+        case 21u: {
+            return abs(b - s);
+        }
+        case 22u: {
+            return b + s - 2.0 * b * s;
+        }
+        case 23u: {
+            return b * s;
+        }
+        default: {
+            return s;
+        }
+    }
+}
+
+fn vector_lum(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.3, 0.59, 0.11));
+}
+
+fn vector_set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    let color = c + (l - vector_lum(c));
+    let lum = vector_lum(color);
+    let low = min(color.r, min(color.g, color.b));
+    let high = max(color.r, max(color.g, color.b));
+    var clipped = color;
+    if low < 0.0 {
+        clipped = lum + (clipped - lum) * lum / max(lum - low, 1e-20);
+    }
+    if high > 1.0 {
+        clipped = lum + (clipped - lum) * (1.0 - lum) / max(high - lum, 1e-20);
+    }
+    return clipped;
+}
+
+fn vector_sat(c: vec3<f32>) -> f32 {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+
+fn vector_set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let low = min(c.r, min(c.g, c.b));
+    let range = vector_sat(c);
+    if range <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    return (c - low) * s / range;
+}
+
+fn vector_blend(source: vec4<f32>, destination: vec4<f32>, mode: u32) -> vec4<f32> {
+    let s = clamp(source.rgb / max(source.a, 1e-20), vec3<f32>(0.0), vec3<f32>(1.0));
+    let b = clamp(destination.rgb / max(destination.a, 1e-20), vec3<f32>(0.0), vec3<f32>(1.0));
+    var blended: vec3<f32>;
+    switch mode {
+        case 24u: {
+            blended = vector_set_lum(vector_set_sat(s, vector_sat(b)), vector_lum(b));
+        }
+        case 25u: {
+            blended = vector_set_lum(vector_set_sat(b, vector_sat(s)), vector_lum(b));
+        }
+        case 26u: {
+            blended = vector_set_lum(s, vector_lum(b));
+        }
+        case 27u: {
+            blended = vector_set_lum(b, vector_lum(s));
+        }
+        default: {
+            blended = vec3<f32>(
+                vector_blend_channel(b.r, s.r, mode),
+                vector_blend_channel(b.g, s.g, mode),
+                vector_blend_channel(b.b, s.b, mode),
+            );
+        }
+    }
+    let both = source.a * destination.a;
+    return vec4<f32>(
+        source.rgb * (1.0 - destination.a) + destination.rgb * (1.0 - source.a) + both * blended,
+        source.a + destination.a - both,
+    );
+}
+
 fn vector_composite(source: vec4<f32>, destination: vec4<f32>, mode: u32) -> vec4<f32> {
     switch mode {
         case 0u: {
@@ -431,7 +565,7 @@ fn vector_composite(source: vec4<f32>, destination: vec4<f32>, mode: u32) -> vec
             return min(source + destination, vec4<f32>(1.0));
         }
         default: {
-            return source;
+            return vector_blend(source, destination, mode);
         }
     }
 }

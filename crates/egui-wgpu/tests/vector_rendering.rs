@@ -287,6 +287,17 @@ fn vector_gpu_rendering() {
         "AOQF",
         "composite-fixture",
     );
+    // Three blend modes fit in the target at a time: Screen through Luminosity.
+    for (index, text) in ["abc", "def", "ghi", "jkl", "mno"].into_iter().enumerate() {
+        color_paints(
+            &device,
+            &queue,
+            &mut renderer,
+            include_bytes!("../../epaint/tests/data/vector-blend.ttf"),
+            text,
+            &format!("blend-fixture-{index}"),
+        );
+    }
     if let Some(path) = std::env::var_os("EGUI_VECTOR_SYSTEM_FONT") {
         color_paints(
             &device,
