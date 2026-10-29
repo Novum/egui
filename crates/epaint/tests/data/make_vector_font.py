@@ -123,6 +123,40 @@ fb.font["COLR"] = buildCOLR({
 }, version=1)
 fb.save(Path(__file__).with_name("vector-composite.ttf"))
 
+# One glyph per W3C blend mode (Screen through Luminosity), mapped from "a".
+# Crossed gradients cover both branches of the piecewise modes, and a
+# translucent source checks the unpremultiplied blend.
+modes = range(13, 28)
+blend_outlines = {".notdef": glyph([box]), "space": glyph([]), "box": glyph([box])}
+blend_outlines.update({f"blend{mode}": glyph([]) for mode in modes})
+fb = FontBuilder(1000, isTTF=True)
+fb.setupGlyphOrder(list(blend_outlines))
+fb.setupCharacterMap({32: "space", **{97 + i: f"blend{mode}" for i, mode in enumerate(modes)}})
+fb.setupGlyf(blend_outlines)
+fb.setupHorizontalMetrics({name: (1000, 100) for name in blend_outlines})
+fb.setupHorizontalHeader(ascent=800, descent=-200)
+fb.setupNameTable({"familyName": "Vector blend test", "styleName": "Regular", "uniqueFontIdentifier": "egui-vector-blend-test", "fullName": "Vector blend test", "psName": "VectorBlendTest"})
+fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
+fb.setupPost()
+fb.setupMaxp()
+
+def gradient(first, second, alpha, x1, y1):
+    return {"Format": PaintFormat.PaintGlyph, "Glyph": "box", "Paint": {
+        "Format": PaintFormat.PaintLinearGradient,
+        "ColorLine": {"Extend": 0, "ColorStop": [
+            {"StopOffset": 0, "PaletteIndex": first, "Alpha": alpha},
+            {"StopOffset": 1, "PaletteIndex": second, "Alpha": alpha},
+        ]},
+        "x0": 100, "y0": 0, "x1": x1, "y1": y1, "x2": 100 + y1, "y2": x1 - 100}}
+
+source = gradient(0, 1, 0.8, 900, 0)
+backdrop = gradient(2, 3, 1, 100, 800)
+fb.font["COLR"] = buildCOLR({f"blend{mode}": composite(source, backdrop, mode) for mode in modes}, version=1)
+fb.font["CPAL"] = buildCPAL([[(0.05, 0.1, 0.9, 1), (1, 0.85, 0.2, 1), (0.9, 0.2, 0.3, 1), (0.2, 0.95, 0.6, 1)]])
+fb.font["head"].created = fb.font["head"].modified = 3400000000
+fb.font.recalcTimestamp = False
+fb.save(Path(__file__).with_name("vector-blend.ttf"))
+
 # A CFF cubic outline checks the cubic-to-quadratic path independently of glyf.
 pen = T2CharStringPen(1000, None)
 pen.moveTo((100, 0))

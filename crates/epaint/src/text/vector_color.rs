@@ -124,7 +124,7 @@ impl color::ColorPainter for Painter<'_, '_> {
 
     fn push_layer(&mut self, mode: color::CompositeMode) {
         self.group_depth += 1;
-        self.supported &= self.group_depth <= 16 && (mode as u8) <= 12;
+        self.supported &= self.group_depth <= 16 && mode != color::CompositeMode::Unknown;
         self.layers.push(Layer::Push(mode));
     }
 
