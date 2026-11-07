@@ -1,4 +1,5 @@
 //! Banded quadratic outlines and paint records for GPU vector fonts.
+//! Based on the Slug algorithm: <https://sluglibrary.com/slug_algorithm.pdf>
 
 use emath::vec2;
 use vello_cpu::kurbo::{self, PathSeg};
