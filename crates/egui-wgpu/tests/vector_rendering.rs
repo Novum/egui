@@ -142,7 +142,7 @@ fn render(
     for shape in shapes {
         tessellator.tessellate_text(shape, &mut mesh);
     }
-    render_mesh(device, queue, renderer, fonts, mesh, dpi)
+    render_mesh(device, queue, renderer, fonts, mesh, dpi, SIZE)
 }
 
 fn render_mesh(
@@ -152,6 +152,7 @@ fn render_mesh(
     fonts: &mut Fonts,
     mesh: Mesh,
     dpi: f32,
+    size: [u32; 2],
 ) -> image::RgbaImage {
     if let Some(delta) = fonts.font_textures_delta() {
         apply_textures(renderer, device, queue, delta);
@@ -164,14 +165,14 @@ fn render_mesh(
         primitive: epaint::Primitive::Mesh(mesh),
     }];
     let screen = ScreenDescriptor {
-        size_in_pixels: SIZE,
+        size_in_pixels: size,
         pixels_per_point: dpi,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Vector regression target"),
         size: wgpu::Extent3d {
-            width: SIZE[0],
-            height: SIZE[1],
+            width: size[0],
+            height: size[1],
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -203,7 +204,7 @@ fn render_mesh(
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: u64::from(SIZE[0] * SIZE[1] * 4),
+        size: u64::from(size[0] * size[1] * 4),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -213,7 +214,7 @@ fn render_mesh(
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(SIZE[0] * 4),
+                bytes_per_row: Some(size[0] * 4),
                 rows_per_image: None,
             },
         },
@@ -240,7 +241,7 @@ fn render_mesh(
         .slice(..)
         .get_mapped_range()
         .expect("mapped readback buffer");
-    image::RgbaImage::from_raw(SIZE[0], SIZE[1], mapped.to_vec()).expect("RGBA readback dimensions")
+    image::RgbaImage::from_raw(size[0], size[1], mapped.to_vec()).expect("RGBA readback dimensions")
 }
 
 fn sample(image: &image::RgbaImage, shape: &TextShape, x: f32, y: f32) -> [u8; 4] {
@@ -268,6 +269,7 @@ fn vector_gpu_rendering() {
         wgpu::TextureFormat::Rgba8Unorm,
         RendererOptions::PREDICTABLE,
     );
+    supersampled_coverage(&device, &queue, &mut renderer);
     mixed_draw_order(&device, &queue, &mut renderer);
     mixed_callback_glyphs(&device, &queue, &mut renderer);
     transformed_existing_text(&device, &queue, &mut renderer);
@@ -529,8 +531,8 @@ fn transformed_existing_text(device: &wgpu::Device, queue: &wgpu::Queue, rendere
                 fonts.font_image_delta().is_none(),
                 "scale {scale} created new curve data"
             );
-            let actual = render_mesh(device, queue, renderer, &mut fonts, cached, 1.0);
-            let expected = render_mesh(device, queue, renderer, &mut fonts, fresh_mesh, 1.0);
+            let actual = render_mesh(device, queue, renderer, &mut fonts, cached, 1.0, SIZE);
+            let expected = render_mesh(device, queue, renderer, &mut fonts, fresh_mesh, 1.0, SIZE);
             let mass: u64 = expected.pixels().map(|p| u64::from(p[3])).sum();
             let error: u64 = core::iter::zip(expected.pixels(), actual.pixels())
                 .map(|(a, b)| u64::from(a[3].abs_diff(b[3])))
@@ -548,7 +550,7 @@ fn transformed_existing_text(device: &wgpu::Device, queue: &wgpu::Queue, rendere
             let mut shape_mesh = glyph_mesh(&fonts, &transformed);
             shape_mesh
                 .translate(epaint::vec2(20.75, 20.75) - shape_mesh.calc_bounds().min.to_vec2());
-            let via_shape = render_mesh(device, queue, renderer, &mut fonts, shape_mesh, 1.0);
+            let via_shape = render_mesh(device, queue, renderer, &mut fonts, shape_mesh, 1.0, SIZE);
             assert_eq!(
                 actual, via_shape,
                 "mesh and text transforms differ at scale={scale}, angle={angle}"
@@ -579,7 +581,7 @@ fn transformed_existing_text(device: &wgpu::Device, queue: &wgpu::Queue, rendere
             };
             scene_mesh
                 .translate(epaint::vec2(20.75, 20.75) - scene_mesh.calc_bounds().min.to_vec2());
-            let via_scene = render_mesh(device, queue, renderer, &mut fonts, scene_mesh, 1.0);
+            let via_scene = render_mesh(device, queue, renderer, &mut fonts, scene_mesh, 1.0, SIZE);
             let difference: u64 = core::iter::zip(actual.pixels(), via_scene.pixels())
                 .map(|(a, b)| u64::from(a[3].abs_diff(b[3])))
                 .sum();
@@ -594,7 +596,7 @@ fn transformed_existing_text(device: &wgpu::Device, queue: &wgpu::Queue, rendere
     // Removing vertex dilation leaves this pixel uncovered even at large sizes.
     let mut edge = original_mesh.clone();
     edge.translate(epaint::vec2(20.75, 20.75) - edge.calc_bounds().min.to_vec2());
-    let image = render_mesh(device, queue, renderer, &mut fonts, edge, 1.0);
+    let image = render_mesh(device, queue, renderer, &mut fonts, edge, 1.0, SIZE);
     let alpha = image.get_pixel(20, 24)[3];
     assert!(
         alpha.abs_diff(64) <= 3,
@@ -623,7 +625,7 @@ fn transformed_existing_text(device: &wgpu::Device, queue: &wgpu::Queue, rendere
             mesh.transform(epaint::emath::TSTransform::from_scaling(9.0));
             mesh.rotate(epaint::emath::Rot2::from_angle(0.2), epaint::Pos2::ZERO);
             mesh.translate(epaint::vec2(30.0, 30.0) - mesh.calc_bounds().min.to_vec2());
-            let image = render_mesh(device, queue, renderer, &mut fonts, mesh, 1.0);
+            let image = render_mesh(device, queue, renderer, &mut fonts, mesh, 1.0, SIZE);
             image
                 .save(dir.join(format!("transformed-{mode:?}.png")))
                 .expect("write transformed capture");
@@ -719,7 +721,7 @@ fn mixed_draw_order(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut R
         Rect::from_min_max(pos2(60.0, 50.0), pos2(80.0, 80.0)),
         Color32::BLUE,
     );
-    let image = render_mesh(device, queue, renderer, &mut fonts, mesh, 1.0);
+    let image = render_mesh(device, queue, renderer, &mut fonts, mesh, 1.0, SIZE);
     assert_eq!(image.get_pixel(35, 35).0, [255, 0, 0, 255], "background");
     assert_eq!(
         image.get_pixel(55, 60).0,
@@ -748,4 +750,135 @@ fn apply_textures(
     for id in delta.free.drain() {
         renderer.free_texture(&id);
     }
+}
+
+fn supersampled_coverage(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut Renderer) {
+    let mut bitmap_renderer = Renderer::new(
+        device,
+        wgpu::TextureFormat::Rgba8Unorm,
+        RendererOptions::PREDICTABLE,
+    );
+    let mut definitions = FontDefinitions::default();
+    let name = definitions.families[&FontFamily::Proportional][0].clone();
+    let mut data = (*definitions.font_data[&name]).clone();
+    data.tweak = Default::default();
+    definitions.font_data.insert(name.clone(), Arc::new(data));
+    definitions
+        .families
+        .insert(FontFamily::Proportional, vec![name]);
+    let options = TextOptions {
+        font_hinting: false,
+        color_transfer_function: epaint::FontColorTransferFunction::Off,
+        ..Default::default()
+    };
+    let mut vector_fonts = Fonts::new(options, definitions.clone());
+    let mut worst_error = [0.0_f64; 2];
+    let mut worst_convergence = 0.0_f64;
+    for dpi in [1.0, 1.25, 2.0] {
+        for size in [8.0, 11.0, 14.0, 24.0] {
+            for angle in [
+                0.0,
+                0.37,
+                core::f32::consts::FRAC_PI_4,
+                core::f32::consts::FRAC_PI_2,
+            ] {
+                for chr in ['H', 'O', 'g', '@'] {
+                    let mut bitmap_fonts = Fonts::new(
+                        TextOptions {
+                            font_rendering: FontRendering::Bitmap,
+                            ..options
+                        },
+                        definitions.clone(),
+                    );
+                    let mut images = Vec::new();
+                    for samples in [1, 16, 24] {
+                        let fonts = if samples == 1 {
+                            &mut vector_fonts
+                        } else {
+                            &mut bitmap_fonts
+                        };
+                        let render_dpi = dpi * samples as f32;
+                        let galley = fonts.with_pixels_per_point(render_dpi).layout_no_wrap(
+                            chr.to_string(),
+                            FontId::proportional(size),
+                            Color32::WHITE,
+                        );
+                        let baseline = pos2(64.25, 64.25) / dpi;
+                        let glyph = &galley.rows[0].glyphs[0];
+                        let shape =
+                            TextShape::new(baseline - glyph.pos.to_vec2(), galley, Color32::WHITE);
+                        let mut tessellator = epaint::Tessellator::new(
+                            render_dpi,
+                            epaint::TessellationOptions {
+                                round_text_to_pixels: false,
+                                ..Default::default()
+                            },
+                            fonts.font_image_resolution(),
+                            vec![],
+                        );
+                        let mut mesh = Mesh::default();
+                        tessellator.tessellate_text(&shape, &mut mesh);
+                        mesh.rotate(epaint::emath::Rot2::from_angle(angle), baseline);
+                        let image = render_mesh(
+                            device,
+                            queue,
+                            if samples == 1 {
+                                renderer
+                            } else {
+                                &mut bitmap_renderer
+                            },
+                            fonts,
+                            mesh,
+                            render_dpi,
+                            [128 * samples; 2],
+                        );
+                        let mut coverage = Vec::new();
+                        for y in 0..128 {
+                            for x in 0..128 {
+                                let mut sum = 0_u32;
+                                for sy in 0..samples {
+                                    for sx in 0..samples {
+                                        sum += u32::from(
+                                            image.get_pixel(x * samples + sx, y * samples + sy)[3],
+                                        );
+                                    }
+                                }
+                                coverage.push(f64::from(sum) / f64::from(samples * samples));
+                            }
+                        }
+                        images.push(coverage);
+                    }
+                    let mass: f64 = images[2].iter().sum();
+                    let error = |a: &[f64], b: &[f64]| -> f64 {
+                        core::iter::zip(a, b)
+                            .map(|(a, b)| (a - b).abs())
+                            .sum::<f64>()
+                            / mass
+                    };
+                    let actual_error = error(&images[0], &images[2]);
+                    let convergence = error(&images[1], &images[2]);
+                    let rotated = usize::from(angle != 0.0);
+                    worst_error[rotated] = worst_error[rotated].max(actual_error);
+                    worst_convergence = worst_convergence.max(convergence);
+                    assert!(
+                        mass > 0.0,
+                        "{chr}, size={size}, dpi={dpi}, angle={angle}: empty supersampled glyph"
+                    );
+                    assert!(
+                        convergence < 0.02,
+                        "{chr}, size={size}, dpi={dpi}, angle={angle}: reference did not converge: {convergence}"
+                    );
+                    // Two-axis ray coverage approximates the pixel area even with supersampling.
+                    let limit = if angle == 0.0 { 0.06 } else { 0.15 };
+                    assert!(
+                        actual_error < limit,
+                        "{chr}, size={size}, dpi={dpi}, angle={angle}: coverage error={actual_error}"
+                    );
+                }
+            }
+        }
+    }
+    log::info!(
+        "Supersampled coverage: worst upright/rotated error={worst_error:?}, reference convergence={worst_convergence:.4}"
+    );
 }

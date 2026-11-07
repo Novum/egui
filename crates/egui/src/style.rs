@@ -2572,10 +2572,18 @@ impl Visuals {
 
             color_transfer_function_ui(ui, color_transfer_function);
 
+            ui.checkbox(
+                font_hinting,
+                if vector_fonts_supported && *font_rendering == epaint::text::FontRendering::Vector
+                {
+                    "Align text baseline to pixels"
+                } else {
+                    "Bitmap font hinting (sharper text)"
+                },
+            );
             ui.add_enabled_ui(
                 !vector_fonts_supported || *font_rendering == epaint::text::FontRendering::Bitmap,
                 |ui| {
-                    ui.checkbox(font_hinting, "Bitmap font hinting (sharper text)");
                     ui.checkbox(
                         subpixel_binning,
                         "Bitmap sub-pixel binning (more even kerning)",

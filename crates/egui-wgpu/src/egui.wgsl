@@ -102,7 +102,7 @@ fn vs_main(
     if a_glyph_origin.x != 0u && abs(det) > 1e-20 {
         // Inverse Jacobian projects a screen pixel onto the two glyph axes.
         let margin = vec2<f32>(abs(v.x) + abs(v.y), abs(u.x) + abs(u.y))
-            * (r_locals.pixel_size.x / abs(det));
+            * (0.5 * r_locals.pixel_size.x / abs(det));
         let dilation = (2.0 * out.vector_coord - vec2<f32>(1.0)) * margin;
         position += u * dilation.x + v * dilation.y;
         out.vector_coord += dilation;
@@ -255,25 +255,19 @@ fn vector_ray(origin: vec2<i32>, p: vec2<f32>, width: vec2<f32>, base: u32, axis
     return vec2<f32>(select(coverage, -coverage, axis == 1u), weight);
 }
 
-fn vector_coverage(origin: vec2<i32>, p: vec2<f32>, width: vec2<f32>, base: u32) -> f32 {
-    // Cross - axis samples integrate coverage over the pixel footprint.
-    let samples = clamp(vec2<u32>(width * 16.0 + vec2<f32>(1.0)), vec2<u32>(1u), vec2<u32>(4u));
-    var x = vec2<f32>(0.0);
-    var y = vec2<f32>(0.0);
-    for (var i = 0u; i < samples.y; i++) {
-        let offset = ((f32(i) + 0.5) / f32(samples.y) - 0.5) * width.y;
-        let ray = vector_ray(origin, p + vec2<f32>(0.0, offset), width, base, 0u);
-        x.x += ray.x / f32(samples.y);
-        x.y = max(x.y, ray.y);
+fn vector_coverage(origin: vec2<i32>, p: vec2<f32>, footprint: mat2x2<f32>, base: u32) -> f32 {
+    // Sample pixel quadrants in screen space, including rotation and shear.
+    var coverage = 0.0;
+    let width = max((abs(footprint[0]) + abs(footprint[1])) * 0.5, vec2<f32>(1e-8));
+    for (var sy = 0u; sy < 2u; sy++) {
+        for (var sx = 0u; sx < 2u; sx++) {
+            let q = p + footprint * (vec2<f32>(f32(sx), f32(sy)) * 0.5 - vec2<f32>(0.25));
+            let x = vector_ray(origin, q, width, base, 0u);
+            let y = vector_ray(origin, q, width, base, 1u);
+            let weighted = abs(x.x * x.y + y.x * y.y) / max(x.y + y.y, 1.0 / 65536.0);
+            coverage += clamp(max(weighted, min(abs(x.x), abs(y.x))), 0.0, 1.0) * 0.25;
+        }
     }
-    for (var i = 0u; i < samples.x; i++) {
-        let offset = ((f32(i) + 0.5) / f32(samples.x) - 0.5) * width.x;
-        let ray = vector_ray(origin, p + vec2<f32>(offset, 0.0), width, base, 1u);
-        y.x += ray.x / f32(samples.x);
-        y.y = max(y.y, ray.y);
-    }
-    let weighted = abs(x.x * x.y + y.x * y.y) / max(x.y + y.y, 1.0 / 65536.0);
-    var coverage = clamp(max(weighted, min(abs(x.x), abs(y.x))), 0.0, 1.0);
     let mode = vector_band(origin, base).x;
     if mode == 1u {
         let gamma = vector_curve(vector_band(origin, base).y).x;
@@ -570,10 +564,10 @@ fn vector_composite(source: vec4<f32>, destination: vec4<f32>, mode: u32) -> vec
     }
 }
 
-fn vector_color(origin: vec2<i32>, coord: vec2<f32>, width: vec2<f32>, foreground: vec4<f32>) -> vec4<f32> {
+fn vector_color(origin: vec2<i32>, coord: vec2<f32>, footprint: mat2x2<f32>, foreground: vec4<f32>) -> vec4<f32> {
     let header = vector_band(origin, 0u);
     if header.x != 3u {
-        return foreground * vector_coverage(origin, coord, width, 0u);
+        return foreground * vector_coverage(origin, coord, footprint, 0u);
     }
     var color = vec4<f32>(0.0);
     var colors: array<vec4<f32>, 16>;
@@ -598,7 +592,7 @@ fn vector_color(origin: vec2<i32>, coord: vec2<f32>, width: vec2<f32>, foregroun
         var coverage = 1.0;
         for (var j = 0u; j < clip_count; j++) {
             let clip = vector_band(origin, base + 1u + j).x;
-            coverage *= vector_coverage(origin, coord, width, clip);
+            coverage *= vector_coverage(origin, coord, footprint, clip);
         }
         let paint = vector_band(origin, base).y;
         let source = vector_paint(origin, paint, coord, foreground) * coverage;
@@ -608,10 +602,10 @@ fn vector_color(origin: vec2<i32>, coord: vec2<f32>, width: vec2<f32>, foregroun
 }
 
 fn sample_color(in: VertexOutput) -> vec4<f32> {
-    let width = max(fwidth(in.vector_coord), vec2<f32>(1e-8));
+    let footprint = mat2x2<f32>(dpdx(in.vector_coord), dpdy(in.vector_coord));
     let texture_color = sample_texture(in);
     if in.vector_origin.x >= 0 {
-        return vector_color(in.vector_origin, in.vector_coord, width, in.color);
+        return vector_color(in.vector_origin, in.vector_coord, footprint, in.color);
     }
     return in.color * texture_color;
 }

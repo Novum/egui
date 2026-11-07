@@ -329,6 +329,7 @@ pub struct FontFace {
     font: FontCell,
     tweak: FontTweak,
     subpixel_binning: bool,
+    align_baseline: bool,
 
     /// Cached `harfrust` shaper data (parsed GSUB/GPOS tables).
     /// `ShaperData` is `Copy` — lives outside the `self_cell`.
@@ -416,8 +417,10 @@ impl FontFace {
         Ok(Self {
             name,
             font,
-            tweak,
             subpixel_binning,
+            align_baseline: options.font_rendering == super::FontRendering::Vector
+                && tweak.hinting.unwrap_or(options.font_hinting),
+            tweak,
             shaper_data,
             glyph_id_cache: Default::default(),
             advance_width_cache: Default::default(),
@@ -432,9 +435,12 @@ impl FontFace {
             font,
             tweak,
             subpixel_binning,
+            align_baseline,
             ..
         } = self;
         *subpixel_binning = tweak.subpixel_binning.unwrap_or(options.subpixel_binning);
+        *align_baseline = options.font_rendering == super::FontRendering::Vector
+            && tweak.hinting.unwrap_or(options.font_hinting);
         let hinting_enabled = options.font_rendering == super::FontRendering::Bitmap
             && tweak.hinting.unwrap_or(options.font_hinting);
         font.with_dependent_mut(|_, font_data| {
@@ -607,9 +613,13 @@ impl FontFace {
         let scale = font_size * self.tweak.scale * pixels_per_point;
         let px_scale_factor = self.font.px_scale_factor(scale);
 
-        let y_offset_in_points = ((font_size * self.tweak.scale * self.tweak.y_offset_factor)
+        let mut y_offset_in_points = ((font_size * self.tweak.scale * self.tweak.y_offset_factor)
             + self.tweak.y_offset)
             .round_ui();
+
+        if self.align_baseline {
+            y_offset_in_points = (y_offset_in_points * pixels_per_point).round() / pixels_per_point;
+        }
 
         let axes = font_data.skrifa.axes();
         // Override the default coordinates with ones specified via FontTweak, then the ones specified directly via the
@@ -730,6 +740,35 @@ pub(crate) struct ShapedGlyph {
 #[cfg(test)]
 mod vector_mode_tests {
     use super::*;
+
+    #[test]
+    fn vector_baseline_alignment_preserves_bitmap_metrics() {
+        let data =
+            crate::text::FontData::from_static(include_bytes!("../../tests/data/vector.ttf"));
+        let mut options = TextOptions::default();
+        let tweak = FontTweak {
+            y_offset_factor: 0.13,
+            ..Default::default()
+        };
+        let mut face = FontFace::new(options, "test".into(), data.font, 0, tweak).unwrap();
+        for dpi in [1.0, 1.25, 1.5, 2.0] {
+            for size in [11.0, 13.5, 17.0] {
+                options.font_rendering = super::super::FontRendering::Vector;
+                face.set_options(options);
+                let vector = face.styled_metrics(dpi, size, &Default::default());
+                let offset = vector.y_offset_in_points * dpi;
+                assert!((offset - offset.round()).abs() < 1e-5);
+                options.font_rendering = super::super::FontRendering::Bitmap;
+                face.set_options(options);
+                let bitmap = face.styled_metrics(dpi, size, &Default::default());
+                assert_eq!(vector.scale, bitmap.scale);
+                assert_eq!(vector.px_scale_factor, bitmap.px_scale_factor);
+                assert_eq!(vector.ascent, bitmap.ascent);
+                assert_eq!(vector.row_height, bitmap.row_height);
+                assert!((vector.y_offset_in_points - bitmap.y_offset_in_points).abs() <= 0.5 / dpi);
+            }
+        }
+    }
 
     #[test]
     fn vector_mode_releases_bitmap_hinting_state() {

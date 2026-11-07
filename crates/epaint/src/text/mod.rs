@@ -70,10 +70,10 @@ pub struct TextOptions {
     /// Controls how to convert glyph colors when writing to the font atlas.
     pub color_transfer_function: crate::FontColorTransferFunction,
 
-    /// Whether to enable font hinting for bitmap outlines.
-    /// Vector caches unhinted font-unit curves and ignores this setting.
+    /// Align text to physical pixels for sharper text.
     ///
-    /// (round some font coordinates to pixels for sharper text).
+    /// Bitmap outlines use font hinting. Vector outlines remain unhinted and retain
+    /// their requested size; only their vertical font offset is rounded to physical pixels.
     ///
     /// Default is `true`.
     pub font_hinting: bool,

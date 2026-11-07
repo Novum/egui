@@ -302,11 +302,7 @@ fn encode(
     let mut curves = Vec::new();
     for segment in path.segments() {
         match segment {
-            PathSeg::Line(line) => curves.push(kurbo::QuadBez::new(
-                line.p0,
-                line.p0.midpoint(line.p1),
-                line.p1,
-            )),
+            PathSeg::Line(line) => curves.push(kurbo::QuadBez::new(line.p0, line.p1, line.p1)),
             PathSeg::Quad(quad) => curves.push(quad),
             PathSeg::Cubic(cubic) => curves.extend(
                 cubic
@@ -329,8 +325,12 @@ fn encode(
             let coord = 1 - axis;
             let min = points.iter().map(|p| p[coord]).fold(1.0_f32, f32::min);
             let max = points.iter().map(|p| p[coord]).fold(0.0_f32, f32::max);
-            let first = ((min * BANDS as f32).floor() as usize).min(BANDS - 1);
-            let last = ((max * BANDS as f32).floor() as usize).min(BANDS - 1);
+            if min == max {
+                continue;
+            }
+            // Overlap adjacent bands to cover floating-point error at their boundaries.
+            let first = (((min - 1.0 / 1024.0) * BANDS as f32).floor() as usize).min(BANDS - 1);
+            let last = (((max + 1.0 / 1024.0) * BANDS as f32).floor() as usize).min(BANDS - 1);
             let bound = points
                 .iter()
                 .map(|p| p[axis])

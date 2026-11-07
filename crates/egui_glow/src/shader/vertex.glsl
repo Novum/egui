@@ -44,7 +44,7 @@ void main() {
     vec2 v = a_glyph_basis_y;
     float det = u.x * v.y - u.y * v.x;
     if (a_glyph_origin.x != 0.0 && abs(det) > 1e-20) {
-        vec2 margin = vec2(abs(v.x) + abs(v.y), abs(u.x) + abs(u.y)) * (u_pixel_size / abs(det));
+        vec2 margin = vec2(abs(v.x) + abs(v.y), abs(u.x) + abs(u.y)) * (0.5 * u_pixel_size / abs(det));
         vec2 dilation = (2.0 * v_vector_coord - vec2(1.0)) * margin;
         position += u * dilation.x + v * dilation.y;
         v_vector_coord += dilation;

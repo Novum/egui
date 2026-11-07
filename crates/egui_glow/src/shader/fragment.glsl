@@ -117,30 +117,19 @@ vec2 vector_ray(ivec2 origin, vec2 p, vec2 width, uint base, bool vertical) {
     return vec2(vertical ? -coverage : coverage, weight);
 }
 
-float vector_coverage(ivec2 origin, vec2 p, vec2 width, uint base) {
-    vec2 samples = clamp(floor(width * 16.0 + 1.0), vec2(1.0), vec2(4.0));
-    vec2 x = vec2(0.0);
-    vec2 y = vec2(0.0);
-    for (int i = 0; i < 4; i++) {
-        if (float(i) >= samples.y) {
-            break;
+float vector_coverage(ivec2 origin, vec2 p, mat2 footprint, uint base) {
+    // Sample pixel quadrants in screen space, including rotation and shear.
+    float coverage = 0.0;
+    vec2 width = max((abs(footprint[0]) + abs(footprint[1])) * 0.5, vec2(1e-8));
+    for (int sy = 0; sy < 2; sy++) {
+        for (int sx = 0; sx < 2; sx++) {
+            vec2 q = p + footprint * (vec2(float(sx), float(sy)) * 0.5 - vec2(0.25));
+            vec2 x = vector_ray(origin, q, width, base, false);
+            vec2 y = vector_ray(origin, q, width, base, true);
+            float weighted = abs(x.x * x.y + y.x * y.y) / max(x.y + y.y, 1.0 / 65536.0);
+            coverage += clamp(max(weighted, min(abs(x.x), abs(y.x))), 0.0, 1.0) * 0.25;
         }
-        float offset = ((float(i) + 0.5) / samples.y - 0.5) * width.y;
-        vec2 ray = vector_ray(origin, p + vec2(0.0, offset), width, base, false);
-        x.x += ray.x / samples.y;
-        x.y = max(x.y, ray.y);
     }
-    for (int i = 0; i < 4; i++) {
-        if (float(i) >= samples.x) {
-            break;
-        }
-        float offset = ((float(i) + 0.5) / samples.x - 0.5) * width.x;
-        vec2 ray = vector_ray(origin, p + vec2(offset, 0.0), width, base, true);
-        y.x += ray.x / samples.x;
-        y.y = max(y.y, ray.y);
-    }
-    float weighted = abs(x.x * x.y + y.x * y.y) / max(x.y + y.y, 1.0 / 65536.0);
-    float coverage = clamp(max(weighted, min(abs(x.x), abs(y.x))), 0.0, 1.0);
     uint mode = vector_band(origin, base).x;
     if (mode == 1u) {
         float gamma = vector_curve(vector_band(origin, base).y).x;
@@ -400,10 +389,10 @@ vec4 vector_composite(vec4 source, vec4 destination, uint mode) {
     }
 }
 
-vec4 vector_color(ivec2 origin, vec2 coord, vec2 width, vec4 foreground) {
+vec4 vector_color(ivec2 origin, vec2 coord, mat2 footprint, vec4 foreground) {
     uvec4 header = vector_band(origin, 0u);
     if (header.x != 3u) {
-        return foreground * vector_coverage(origin, coord, width, 0u);
+        return foreground * vector_coverage(origin, coord, footprint, 0u);
     }
     vec4 color = vec4(0.0);
     vec4 colors[16];
@@ -428,7 +417,7 @@ vec4 vector_color(ivec2 origin, vec2 coord, vec2 width, vec4 foreground) {
         float coverage = 1.0;
         for (uint j = 0u; j < clip_count; j++) {
             uint clip = vector_band(origin, base + 1u + j).x;
-            coverage *= vector_coverage(origin, coord, width, clip);
+            coverage *= vector_coverage(origin, coord, footprint, clip);
         }
         uint paint = vector_band(origin, base).y;
         vec4 source = vector_paint(origin, paint, coord, foreground) * coverage;
@@ -441,13 +430,13 @@ vec4 vector_color(ivec2 origin, vec2 coord, vec2 width, vec4 foreground) {
 
 void main() {
 #if NEW_SHADER_INTERFACE
-    vec2 width = max(fwidth(v_vector_coord), vec2(1e-8));
+    mat2 footprint = mat2(dFdx(v_vector_coord), dFdy(v_vector_coord));
 #endif
     vec4 texture_in_gamma = texture2D(u_sampler, v_tc);
     vec4 frag_color_gamma = v_rgba_in_gamma * texture_in_gamma;
 #if NEW_SHADER_INTERFACE
     if (v_vector_origin.x >= 0.0) {
-        frag_color_gamma = vector_color(ivec2(v_vector_origin), v_vector_coord, width, v_rgba_in_gamma);
+        frag_color_gamma = vector_color(ivec2(v_vector_origin), v_vector_coord, footprint, v_rgba_in_gamma);
     }
 #endif
 
